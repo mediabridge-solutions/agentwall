@@ -19,8 +19,9 @@ npm ci
 docker compose up -d --build
 ```
 
-Gateway: http://127.0.0.1:8049. Local domain: http://agentwall.local after the Docker
-address is added to `/etc/hosts`. Direct app/admin: http://127.0.0.1:3049.
+Gateway: http://127.0.0.1:8049. Local domain: http://agentwall.local; the one-shot `hosts`
+service updates only the marked Agent Wall block in `/etc/hosts`, following the local
+project convention. Direct app/admin: http://127.0.0.1:3049.
 The setup script creates random development secrets and preserves any existing `.env`.
 
 ## Features

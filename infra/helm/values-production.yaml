@@ -1,0 +1,6 @@
+publicUrl: https://agentwall.net
+contactEmail: hello@agentwall.net
+indexingEnabled: true
+ingress:
+  host: agentwall.net
+  tls: true

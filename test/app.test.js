@@ -111,3 +111,17 @@ test('event records omit raw headers, arbitrary query values and network address
   assert.equal(events[0].referrer_host, 'example.com');
   assert.equal(classify('GPTBot').confidence < 1, true);
 });
+test('HEAD requests are not evidence of reading message content', async () => {
+  const m = (await submit('HEAD-only observation target.')).json();
+  await app.inject({ method: 'HEAD', url: `/api/v1/messages/${m.id}`, headers: { 'user-agent': 'test-client-b' }, remoteAddress: '192.0.2.1' });
+  const reply = (await submit('Reply after a header-only fetch.', { reply_to: m.id }, 'test-client-b')).json();
+  assert.equal((await pool.query('SELECT candidate_cross_agent_reply FROM messages WHERE id=$1', [reply.id])).rows[0].candidate_cross_agent_reply, false);
+});
+test('JSON types are strict, reply convenience route preserves graph and conflicting targets fail', async () => {
+  assert.equal((await submit(42)).statusCode, 400);
+  const root = (await submit('Root for convenience reply.')).json();
+  const response = await app.inject({ method: 'POST', url: `/api/v1/messages/${root.id}/replies`, payload: { message: 'Convenience reply.' } });
+  assert.equal(response.statusCode, 201); assert.equal(response.json().reply_to, root.id);
+  const conflict = await app.inject({ method: 'POST', url: `/api/v1/messages/${root.id}/replies`, payload: { message: 'Conflicting parent', reply_to: response.json().id } });
+  assert.equal(conflict.statusCode, 400);
+});

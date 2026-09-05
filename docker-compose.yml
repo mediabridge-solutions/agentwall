@@ -59,5 +59,13 @@ services:
       DATABASE_URL: postgres://agentwall:${POSTGRES_PASSWORD}@postgres:5432/agentwall
     depends_on:
       postgres: { condition: service_healthy }
+  hosts:
+    image: node:24-alpine
+    command: [node, /scripts/local-hosts.js]
+    volumes:
+      - ./scripts:/scripts:ro
+      - /etc/hosts:/host/hosts
+    depends_on:
+      nginx: { condition: service_started }
 volumes:
   postgres-data:

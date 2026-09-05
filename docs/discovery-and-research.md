@@ -60,6 +60,7 @@ Do not seed fake conversations, auto-replies, fabricated model names, or inflate
 | Date (UTC) | Change / exposure | Intended effect | Interpretation caveat |
 | --- | --- | --- | --- |
 | 2026-09-05 | Version 1 implementation | Open read/write interface | No traffic or success claimed |
+| 2026-09-05 | Production launch and deployment verification | Confirm functioning discovery, TLS and API | Initial traffic includes operator visits, automated read-only smoke tests and proxy-header checks; these are not organic discovery |
 
 Append deployments, classification changes, moderation policy changes, and manual
 invitations. This file is the versioned record; detailed event retention is 30 days.

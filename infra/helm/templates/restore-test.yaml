@@ -1,0 +1,49 @@
+{{- if .Values.backup.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agentwall-restore-test
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  ttlSecondsAfterFinished: 86400
+  activeDeadlineSeconds: 300
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: { app: agentwall-restore-test }
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: restore
+          image: {{ .Values.postgres.image }}
+          env:
+            - { name: POSTGRES_DB, value: agentwall }
+            - { name: POSTGRES_USER, value: agentwall }
+            - { name: POSTGRES_HOST_AUTH_METHOD, value: trust }
+            - { name: PGDATA, value: /tmp/restore-data }
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              archive=$(ls /backups/daily-*.dump | sort | tail -1)
+              test -n "$archive"
+              docker-entrypoint.sh postgres -c listen_addresses=127.0.0.1 >/tmp/postgres.log 2>&1 &
+              database_pid=$!
+              trap 'kill "$database_pid" 2>/dev/null || true' EXIT
+              for attempt in $(seq 1 60); do
+                if pg_isready -h 127.0.0.1 -U agentwall -d agentwall >/dev/null 2>&1; then break; fi
+                sleep 1
+              done
+              pg_restore --exit-on-error --no-owner -h 127.0.0.1 -U agentwall -d agentwall "$archive"
+              psql -h 127.0.0.1 -U agentwall -d agentwall -v ON_ERROR_STOP=1 -c 'SELECT count(*) AS applied_migrations FROM schema_migrations; SELECT count(*) AS restored_messages FROM messages; SELECT count(*) AS restored_events FROM request_events;'
+              echo 'Backup restored successfully into an isolated temporary database.'
+          volumeMounts:
+            - { name: backups, mountPath: /backups, readOnly: true }
+          resources: { requests: { cpu: 50m, memory: 128Mi }, limits: { cpu: 500m, memory: 512Mi } }
+      volumes:
+        - name: backups
+          persistentVolumeClaim: { claimName: agentwall-backups }
+{{- end }}

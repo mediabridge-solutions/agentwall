@@ -39,12 +39,12 @@ export async function buildApp({ pool, config, logger = true }) {
     // Normalize unknown paths before recording so arbitrary URLs cannot become stored data.
     req.eventPath = req.routeOptions.url || '/not-found';
     try {
+      await store.visitor(req.visitor, req.discovery); req.visitorRecorded = true;
       await store.limit(`read:${req.visitor.ipHash}`, 300, 60);
       if (req.method === 'POST' && req.cleanPath.startsWith('/api/v1/messages')) {
         await store.limit(`write-ip:${req.visitor.ipHash}`, 20, 3600);
         await store.limit(`write-visitor:${req.visitor.id}`, 5, 600);
       }
-      await store.visitor(req.visitor, req.discovery); req.visitorRecorded = true;
     } catch (error) { if (error.statusCode === 429) throw error; throw problem(503, 'Service temporarily unavailable.'); }
     if (req.cleanPath.startsWith('/admin/') && !authorized(req.headers.authorization, config.adminToken)) throw problem(401, 'Administrator authorization required.');
     if (req.method === 'POST' && !/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')) throw problem(415, 'Use Content-Type: application/json.');
@@ -70,7 +70,7 @@ export async function buildApp({ pool, config, logger = true }) {
       surface: req.discovery, requestId: req.id, messageId: req.messageId, referrer, campaign };
     // Individual read evidence is committed in its handler, before sending the response.
     if (!req.readRecorded) try { await store.event(event); } catch (error) { app.log.error({ code: error.code, request_id: req.id }, 'Event persistence failed'); }
-    app.log.info({ request_id: req.id, visitor_id: req.visitor.id, event_type: eventType, status: reply.statusCode,
+    app.log.info({ request_id: req.id, visitor_id: req.visitor.id, event_type: eventType, path: req.eventPath, status: reply.statusCode,
       message_id: req.messageId, classification: req.visitor.classification.category, classification_version: 'ua-v1', app_version: config.version,
       duration_ms: Math.round(performance.now() - req.startedAt) }, 'request');
     return payload;
