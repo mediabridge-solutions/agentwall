@@ -1,0 +1,9 @@
+.git
+.env*
+node_modules
+artifacts
+test-results
+playwright-report
+backups
+agent-wall-implementation-guide.md
+docs

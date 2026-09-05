@@ -1,0 +1,63 @@
+name: agentwall
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: agentwall
+      POSTGRES_USER: agentwall
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run node scripts/setup-local.js first}
+    ports: ["127.0.0.1:5549:5432"]
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentwall -d agentwall"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgres://agentwall:${POSTGRES_PASSWORD}@postgres:5432/agentwall
+      PUBLIC_URL: http://agentwall.local
+      IP_HASH_SECRET: ${IP_HASH_SECRET:?Required}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?Required}
+      CONTACT_EMAIL: ${CONTACT_EMAIL:-hello@agentwall.net}
+      INDEXING_ENABLED: "false"
+      TRUST_PROXY: "172.16.0.0/12,192.168.0.0/16"
+      LOG_LEVEL: info
+    ports: ["127.0.0.1:3049:3000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+  nginx:
+    image: nginx:1.28-alpine
+    ports: ["127.0.0.1:8049:8080"]
+    volumes: ["./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro"]
+    networks:
+      default:
+        aliases: [agentwall.local]
+    depends_on:
+      app: { condition: service_healthy }
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp", "/var/cache/nginx", "/var/run"]
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+  maintenance:
+    build: .
+    profiles: [tools]
+    command: ["node", "src/maintenance.js"]
+    environment:
+      DATABASE_URL: postgres://agentwall:${POSTGRES_PASSWORD}@postgres:5432/agentwall
+    depends_on:
+      postgres: { condition: service_healthy }
+volumes:
+  postgres-data:

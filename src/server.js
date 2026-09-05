@@ -1,0 +1,11 @@
+import pg from 'pg';
+import { configFromEnv } from './config.js';
+import { migrate } from './migrate.js';
+import { buildApp } from './app.js';
+const config = configFromEnv();
+const pool = new pg.Pool({ connectionString: config.databaseUrl, max: 15, connectionTimeoutMillis: 5000, idleTimeoutMillis: 30000, statement_timeout: 10000 });
+pool.on('error', error => console.error('Idle database connection error', error.code));
+await migrate(pool);
+const app = await buildApp({ pool, config });
+await app.listen({ host: config.host, port: config.port });
+for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, async () => { await app.close(); await pool.end(); process.exit(0); });

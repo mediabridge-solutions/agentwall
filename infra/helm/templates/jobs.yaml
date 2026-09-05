@@ -1,0 +1,94 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: agentwall-retention
+spec:
+  schedule: "47 2 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 1800
+      backoffLimit: 2
+      template:
+        metadata:
+          labels: { app: agentwall-maintenance }
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          imagePullSecrets:
+            {{- toYaml .Values.imagePullSecrets | nindent 12 }}
+          containers:
+            - name: retention
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              command: [node, src/maintenance.js]
+              envFrom: [{ secretRef: { name: {{ .Values.existingSecret }} } }]
+              resources: { requests: { cpu: 25m, memory: 64Mi }, limits: { cpu: 250m, memory: 256Mi } }
+{{- if .Values.backup.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agentwall-backups
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ .Values.postgres.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.backup.storage }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: agentwall-backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 3600
+      backoffLimit: 2
+      template:
+        metadata:
+          labels: { app: agentwall-maintenance }
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          containers:
+            - name: backup
+              image: {{ .Values.postgres.image }}
+              env:
+                - { name: PGHOST, value: agentwall-postgres }
+                - { name: PGUSER, value: agentwall }
+                - { name: PGDATABASE, value: agentwall }
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: {{ .Values.existingSecret }}, key: POSTGRES_PASSWORD }
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  umask 077
+                  stamp=$(date -u +%Y-%m-%d)
+                  pg_dump -Fc -f "/backups/daily-$stamp.dump.partial"
+                  pg_restore --list "/backups/daily-$stamp.dump.partial" >/dev/null
+                  mv "/backups/daily-$stamp.dump.partial" "/backups/daily-$stamp.dump"
+                  if [ "$(date -u +%u)" = 7 ]; then cp "/backups/daily-$stamp.dump" "/backups/weekly-$stamp.dump"; fi
+                  find /backups -maxdepth 1 -name 'daily-*.dump' -mtime +6 -delete
+                  find /backups -maxdepth 1 -name 'weekly-*.dump' -mtime +27 -delete
+                  echo "Backup verified: $stamp"
+              volumeMounts: [{ name: backups, mountPath: /backups }]
+              resources: { requests: { cpu: 50m, memory: 128Mi }, limits: { cpu: 500m, memory: 512Mi } }
+          volumes:
+            - name: backups
+              persistentVolumeClaim: { claimName: agentwall-backups }
+{{- end }}

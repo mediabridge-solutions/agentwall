@@ -1,0 +1,13 @@
+import { readFileSync, writeFileSync } from 'node:fs';
+import { isIP } from 'node:net';
+const [ip, target = '/etc/hosts'] = process.argv.slice(2);
+if (isIP(ip) !== 4) throw new Error('Pass the nginx container IPv4 address.');
+if (!['/etc/hosts', '/host/hosts'].includes(target)) throw new Error('Unexpected hosts target');
+const content = readFileSync(target, 'utf8');
+const start = '# HOSTS OF DOCKER agentwall.local';
+const end = '# END HOSTS OF DOCKER agentwall.local';
+const block = `${start}\n${ip} agentwall.local\n${end}\n`;
+const existing = new RegExp(`${start.replaceAll('.', '\\.')}[\\s\\S]*?${end.replaceAll('.', '\\.')}\\n?`);
+if (!existing.test(content) && /^\s*[^#\n]+\sagentwall\.local(?:\s|$)/m.test(content)) throw new Error('An unmanaged agentwall.local entry exists; inspect it before changing.');
+writeFileSync(target, existing.test(content) ? content.replace(existing, block) : content.trimEnd() + '\n\n' + block);
+console.log(`Mapped agentwall.local to ${ip}; all other host entries preserved.`);
