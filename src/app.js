@@ -21,7 +21,7 @@ export async function buildApp({ pool, config, logger = true }) {
   app.decorate('store', store);
   const collection = result => ({ ...result, messages: result.messages.map(m => publicMessage(m, config)), content_trust: trust });
   const assets = new Map();
-  for (const [name, type] of [['style.css', 'text/css'], ['app.js', 'text/javascript'], ['favicon.svg', 'image/svg+xml']]) {
+  for (const [name, type] of [['style.css', 'text/css'], ['readability.css', 'text/css'], ['app.js', 'text/javascript'], ['favicon.svg', 'image/svg+xml']]) {
     assets.set(`/assets/${name}`, { body: await readFile(new URL(`../public/${name}`, import.meta.url)), type });
   }
   try { assets.set('/assets/social.png', { body: await readFile(new URL('../public/social.png', import.meta.url)), type: 'image/png' }); } catch { /* created during asset preparation */ }
@@ -34,6 +34,7 @@ export async function buildApp({ pool, config, logger = true }) {
     if (!config.indexing || req.cleanPath.startsWith('/api/') || req.cleanPath.startsWith('/admin/')) reply.header('X-Robots-Tag', 'noindex, follow');
     if (req.cleanPath === '/health/live' || req.cleanPath === '/health/ready' || req.cleanPath.startsWith('/assets/')) return;
     req.visitor = identity(req, config); req.discovery = surface(req.cleanPath);
+    req.internalTraffic = req.cleanPath.startsWith('/admin/') || authorized(req.headers['x-agentwall-observation-token'], config.adminToken);
     req.replyAttempt = /\/replies$/.test(req.cleanPath);
     req.startedAt = performance.now();
     // Normalize unknown paths before recording so arbitrary URLs cannot become stored data.
@@ -63,22 +64,22 @@ export async function buildApp({ pool, config, logger = true }) {
     let referrer = null;
     try { referrer = new URL(req.headers.referer).hostname.slice(0, 253); } catch { /* absent or invalid */ }
     const campaignValue = new URL(req.url, config.publicUrl).searchParams.get('utm_campaign');
-    const campaign = ['launch', 'manual-seed', 'research'].includes(campaignValue) ? campaignValue : null;
+    const campaign = ['launch', 'manual-seed', 'research', 'social-share'].includes(campaignValue) ? campaignValue : null;
     const writing = req.method === 'POST' && req.cleanPath.startsWith('/api/v1/messages');
-    const eventType = writing ? `${req.replyAttempt ? 'reply' : 'post'}_${reply.statusCode === 201 ? 'success' : 'rejected'}` : (req.eventType || `${req.discovery}_read`);
+    const eventType = writing ? `${req.replyAttempt ? 'reply' : 'post'}_${reply.statusCode === 201 ? 'success' : 'rejected'}` : reply.statusCode >= 400 ? 'request_rejected' : req.method === 'HEAD' ? 'headers_read' : (req.eventType || `${req.discovery}_read`);
     const event = { visitor: req.visitor, method: req.method, path: req.eventPath, status: reply.statusCode, type: eventType,
-      surface: req.discovery, requestId: req.id, messageId: req.messageId, referrer, campaign };
+      surface: req.discovery, requestId: req.id, messageId: req.messageId, referrer, campaign, internal: req.internalTraffic };
     // Individual read evidence is committed in its handler, before sending the response.
     if (!req.readRecorded) try { await store.event(event); } catch (error) { app.log.error({ code: error.code, request_id: req.id }, 'Event persistence failed'); }
     app.log.info({ request_id: req.id, visitor_id: req.visitor.id, event_type: eventType, path: req.eventPath, status: reply.statusCode,
-      message_id: req.messageId, classification: req.visitor.classification.category, classification_version: 'ua-v1', app_version: config.version,
+      message_id: req.messageId, internal: req.internalTraffic, classification: req.visitor.classification.category, classification_version: 'ua-v1', app_version: config.version,
       duration_ms: Math.round(performance.now() - req.startedAt) }, 'request');
     return payload;
   });
   async function recordRead(req, messageId) {
     if (req.method !== 'GET') return;
     req.eventType = 'message_read'; req.messageId = messageId;
-    await store.event({ visitor: req.visitor, method: req.method, path: req.eventPath, status: 200, type: 'message_read', surface: req.discovery, requestId: req.id, messageId });
+    await store.event({ visitor: req.visitor, method: req.method, path: req.eventPath, status: 200, type: 'message_read', surface: req.discovery, requestId: req.id, messageId, internal: req.internalTraffic });
     req.readRecorded = true;
   }
   app.setErrorHandler((error, req, reply) => {

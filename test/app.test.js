@@ -8,7 +8,7 @@ import { classify } from '../src/identity.js';
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl || !new URL(databaseUrl).pathname.endsWith('_test')) throw new Error('TEST_DATABASE_URL must point to a dedicated database whose name ends in _test');
 const pool = new pg.Pool({ connectionString: databaseUrl });
-const config = { publicUrl: 'https://agentwall.net', secret: 'test-secret'.repeat(8), adminToken: 'test-admin'.repeat(8), indexing: true, trustProxy: false, contact: 'hello@agentwall.net', version: 'test' };
+const config = { publicUrl: 'https://agentwall.net', secret: 'test-secret'.repeat(8), adminToken: 'test-admin'.repeat(8), indexing: true, trustProxy: false, contact: 'office@mediabridge.solutions', version: 'test' };
 let app;
 const submit = (message, extra = {}, ua = 'test-client-a', remoteAddress = '192.0.2.1') => app.inject({ method: 'POST', url: '/api/v1/messages', headers: { 'user-agent': ua }, remoteAddress, payload: { message, ...extra } });
 const admin = (id, action) => app.inject({ method: 'POST', url: `/admin/messages/${id}/moderate`, headers: { authorization: `Bearer ${config.adminToken}` }, payload: { action, reason: 'Integration test moderation' } });
@@ -23,6 +23,8 @@ test('SSR and discovery routes are complete and honest when empty', async () => 
   const home = await app.inject('/');
   assert.match(home.body, /Listening for the first message/);
   assert.match(home.body, /Participation is optional/);
+  assert.match(home.body, /https:\/\/mediabridge.solutions/);
+  assert.doesNotMatch((await app.inject('/about')).body, /Bogdan Podlesnii/);
   assert.match(home.body, /rel="canonical" href="https:\/\/agentwall.net\/"/);
   assert.equal((await app.inject('/api/v1/random')).json().message, null);
 });
@@ -124,4 +126,24 @@ test('JSON types are strict, reply convenience route preserves graph and conflic
   assert.equal(response.statusCode, 201); assert.equal(response.json().reply_to, root.id);
   const conflict = await app.inject({ method: 'POST', url: `/api/v1/messages/${root.id}/replies`, payload: { message: 'Conflicting parent', reply_to: response.json().id } });
   assert.equal(conflict.statusCode, 400);
+});
+test('traffic counts unique clients separately, errors are not discovery reads, internal checks stay separate', async () => {
+  await app.inject({ url: '/', headers: { 'user-agent': 'same-client' } });
+  await app.inject({ url: '/about', headers: { 'user-agent': 'same-client' } });
+  await app.inject({ url: '/missing-page', headers: { 'user-agent': 'same-client' } });
+  await app.inject({ url: '/openapi.json', headers: { 'user-agent': 'second-client' } });
+  await app.inject({ url: '/', headers: { 'user-agent': 'internal-check', 'x-agentwall-observation-token': `Bearer ${config.adminToken}` } });
+  const stats = await app.store.stats();
+  assert.equal(stats.requests, 4); assert.equal(stats.recorded_requests, 5);
+  assert.equal(stats.internal_requests, 1); assert.equal(stats.client_fingerprints, 2);
+  assert.equal(stats.successful_reads, 3); assert.equal(stats.page_reads, 2);
+  assert.equal(stats.failed_requests, 1); assert.equal(stats.surfaces.reduce((n, s) => n + s.count, 0), 3);
+  assert.equal(stats.classifications.reduce((n, c) => n + c.count, 0), 2);
+  assert.ok(stats.window_start); assert.ok(stats.definitions.client_fingerprints);
+  const failed = (await pool.query("SELECT event_type FROM request_events WHERE status_code=404")).rows[0];
+  assert.equal(failed.event_type, 'request_rejected');
+});
+test('an unauthenticated internal marker cannot hide public requests', async () => {
+  await app.inject({ url: '/', headers: { 'x-agentwall-observation-token': 'Bearer fake' } });
+  const stats = await app.store.stats(); assert.equal(stats.requests, 1); assert.equal(stats.internal_requests, 0);
 });

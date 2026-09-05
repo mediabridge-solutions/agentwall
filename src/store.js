@@ -12,9 +12,9 @@ export class Store {
     [v.id, v.classification.category, v.classification.confidence, v.classification.reason, discovery]);
   }
   async event(e) {
-    await this.pool.query(`INSERT INTO request_events(visitor_id,method,path,status_code,event_type,discovery_surface,request_id,message_id,referrer_host,campaign,classification)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-    [e.visitor.id, e.method, e.path, e.status, e.type, e.surface, e.requestId, e.messageId || null, e.referrer || null, e.campaign || null, e.visitor.classification.category]);
+    await this.pool.query(`INSERT INTO request_events(visitor_id,method,path,status_code,event_type,discovery_surface,request_id,message_id,referrer_host,campaign,classification,is_internal)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(request_id) DO NOTHING`,
+    [e.visitor.id, e.method, e.path, e.status, e.type, e.surface, e.requestId, e.messageId || null, e.referrer || null, e.campaign || null, e.visitor.classification.category, !!e.internal]);
   }
   async limit(key, max, seconds, db = this.pool) {
     const { rows } = await db.query(`INSERT INTO rate_buckets(key,count,expires_at) VALUES($1,1,now()+$2*interval '1 second')
@@ -110,22 +110,60 @@ export class Store {
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
   async stats() {
-    const [counts, traffic, surfaces, claims, classes, activity, conversation] = await Promise.all([
-      this.pool.query(`SELECT count(*)::int AS messages,count(*) FILTER(WHERE reply_to IS NOT NULL)::int AS replies,
-        count(DISTINCT thread_id)::int AS threads,count(*) FILTER(WHERE candidate_cross_agent_reply)::int AS candidates,
-        count(*) FILTER(WHERE identity IS NOT NULL)::int AS named_messages,count(*) FILTER(WHERE claimed_model IS NOT NULL)::int AS model_claims,
-        COALESCE(max(depth),0)::int AS longest_chain FROM messages m WHERE ${visible}`),
-      this.pool.query("SELECT count(*)::int AS requests, count(DISTINCT visitor_id)::int AS visitors, count(*) FILTER(WHERE method='POST' AND path LIKE '/api/v1/messages%')::int AS post_attempts FROM request_events WHERE created_at>now()-interval '24 hours'"),
-      this.pool.query("SELECT discovery_surface AS name,count(*)::int AS count FROM request_events WHERE created_at>now()-interval '24 hours' GROUP BY 1 ORDER BY 2 DESC"),
-      this.pool.query(`SELECT COALESCE(claimed_model,'Unknown') AS name,count(*)::int AS count FROM messages m WHERE ${visible} GROUP BY 1 ORDER BY 2 DESC LIMIT 12`),
-      this.pool.query("SELECT classification AS name,count(*)::int AS count FROM visitors WHERE last_seen_at>now()-interval '24 hours' GROUP BY 1 ORDER BY 2 DESC"),
-      this.pool.query("SELECT created_at,event_type,discovery_surface,classification FROM request_events WHERE created_at>now()-interval '24 hours' ORDER BY id DESC LIMIT 15"),
-      this.pool.query(`SELECT count(*) FILTER(WHERE n>=2)::int AS threads_two_visitors,count(*) FILTER(WHERE n>=3)::int AS threads_three_visitors FROM (SELECT count(DISTINCT visitor_id) AS n FROM messages m WHERE ${visible} GROUP BY thread_id) x`),
-    ]);
-    const delay = await this.pool.query(`SELECT percentile_cont(0.5) WITHIN GROUP(ORDER BY extract(epoch FROM (m.created_at-p.created_at))) AS median_reply_seconds
-      FROM messages m JOIN messages p ON m.reply_to=p.id WHERE m.moderation_state='visible' AND p.moderation_state='visible'`);
-    return { ...counts.rows[0], ...traffic.rows[0], ...conversation.rows[0], ...delay.rows[0], surfaces: surfaces.rows, claims: claims.rows, classifications: classes.rows, activity: activity.rows,
-      generated_at: new Date().toISOString(), traffic_window: '24 hours', classification_version: 'ua-v1', caveat: 'Visitor identities are daily, approximate fingerprints. Model names and User-Agents are unverified claims. Candidates are not proof of AI-to-AI interaction.' };
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      const now = (await client.query('SELECT now() AS time')).rows[0].time;
+      const from = new Date(now.getTime() - 86400000);
+      const params = [from, now];
+      const window = 'created_at >= $1 AND created_at < $2';
+      const publicWindow = window + ' AND NOT is_internal';
+      const [counts, traffic, surfaces, claims, classes, activity, conversation, delay] = await Promise.all([
+        client.query(`SELECT count(*)::int AS messages,count(*) FILTER(WHERE reply_to IS NOT NULL)::int AS replies,
+          count(DISTINCT thread_id)::int AS threads,count(DISTINCT visitor_id)::int AS posting_fingerprints,
+          count(*) FILTER(WHERE candidate_cross_agent_reply)::int AS candidates,
+          count(*) FILTER(WHERE identity IS NOT NULL)::int AS named_messages,count(*) FILTER(WHERE claimed_model IS NOT NULL)::int AS model_claims,
+          COALESCE(max(depth),0)::int AS longest_chain FROM messages m WHERE ${visible}`),
+        client.query(`SELECT count(*)::int AS recorded_requests,
+          count(*) FILTER(WHERE is_internal)::int AS internal_requests,
+          count(*) FILTER(WHERE NOT is_internal)::int AS requests,
+          count(DISTINCT visitor_id) FILTER(WHERE NOT is_internal)::int AS client_fingerprints,
+          count(DISTINCT visitor_id) FILTER(WHERE NOT is_internal AND status_code=200 AND method='GET')::int AS reader_fingerprints,
+          count(*) FILTER(WHERE NOT is_internal AND status_code>=400)::int AS failed_requests,
+          count(*) FILTER(WHERE NOT is_internal AND status_code>=500)::int AS server_errors,
+          count(*) FILTER(WHERE NOT is_internal AND status_code=404)::int AS not_found_requests,
+          count(*) FILTER(WHERE NOT is_internal AND status_code=200 AND method='GET')::int AS successful_reads,
+          count(*) FILTER(WHERE NOT is_internal AND status_code=200 AND method='GET' AND path IN ('/','/about','/privacy','/participate','/messages','/messages/:id','/threads/:id','/observatory','/api'))::int AS page_reads,
+          count(*) FILTER(WHERE NOT is_internal AND status_code=201 AND method='POST')::int AS successful_writes,
+          count(*) FILTER(WHERE NOT is_internal AND method='POST' AND path LIKE '/api/v1/messages%')::int AS post_attempts
+          FROM request_events WHERE ${window}`, params),
+        client.query(`SELECT discovery_surface AS name,count(*)::int AS count FROM request_events WHERE ${publicWindow} AND method='GET' AND status_code=200 GROUP BY 1 ORDER BY 2 DESC`, params),
+        client.query(`SELECT COALESCE(claimed_model,'Unknown') AS name,count(*)::int AS count FROM messages m WHERE ${visible} GROUP BY 1 ORDER BY 2 DESC LIMIT 12`),
+        client.query(`SELECT classification AS name,count(DISTINCT visitor_id)::int AS count FROM request_events WHERE ${publicWindow} GROUP BY 1 ORDER BY 2 DESC`, params),
+        client.query(`SELECT created_at,status_code,event_type,discovery_surface,classification FROM request_events WHERE ${publicWindow} ORDER BY id DESC LIMIT 15`, params),
+        client.query(`SELECT count(*) FILTER(WHERE n>=2)::int AS threads_two_visitors,count(*) FILTER(WHERE n>=3)::int AS threads_three_visitors FROM (SELECT count(DISTINCT visitor_id) AS n FROM messages m WHERE ${visible} GROUP BY thread_id) x`),
+        client.query(`SELECT percentile_cont(0.5) WITHIN GROUP(ORDER BY extract(epoch FROM (m.created_at-p.created_at))) AS median_reply_seconds
+          FROM messages m JOIN messages p ON m.reply_to=p.id WHERE m.moderation_state='visible' AND p.moderation_state='visible'`),
+      ]);
+      await client.query('COMMIT');
+      const totals = traffic.rows[0];
+      return { ...counts.rows[0], ...totals, visitors: totals.client_fingerprints,
+        ...conversation.rows[0], ...delay.rows[0], surfaces: surfaces.rows, claims: claims.rows,
+        classifications: classes.rows, activity: activity.rows, generated_at: now.toISOString(),
+        traffic_window: '24 hours', window_start: from.toISOString(), window_end: now.toISOString(),
+        measurement_version: 'requests-v2', classification_version: 'ua-v1',
+        definitions: {
+          requests: 'Recorded application requests excluding authenticated verification and admin traffic; includes errors. Static assets, health checks and edge-only traffic are not recorded.',
+          client_fingerprints: 'Distinct daily IP + User-Agent HMAC fingerprints across these requests. Not unique people, AI agents, sessions or unique IP addresses.',
+          visitors: 'Deprecated alias for client_fingerprints; retained for API compatibility.',
+          successful_reads: 'GET requests that returned 200, including pages, APIs and discovery documents.',
+          page_reads: 'Successful GET requests to known HTML pages. Includes automated clients; not verified human pageviews.',
+          surfaces: 'Successful GET requests only, not first-touch attribution or unique visitors.',
+          internal_requests: 'Authenticated verification/admin requests. Earlier unmarked test traffic remains in the historical record.',
+        },
+        caveat: 'Fingerprints are approximate clients, not people or verified agents. Historical traffic includes unmarked deployment checks. Model names and User-Agents are unverified claims.',
+      };
+    } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
 }
 export function encodeCursor(row) { return Buffer.from(JSON.stringify({ time: new Date(row.created_at).toISOString(), id: row.id })).toString('base64url'); }

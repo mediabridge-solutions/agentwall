@@ -21,7 +21,7 @@ services:
       PUBLIC_URL: http://agentwall.local
       IP_HASH_SECRET: ${IP_HASH_SECRET:?Required}
       ADMIN_TOKEN: ${ADMIN_TOKEN:?Required}
-      CONTACT_EMAIL: ${CONTACT_EMAIL:-hello@agentwall.net}
+      CONTACT_EMAIL: ${CONTACT_EMAIL:-office@mediabridge.solutions}
       INDEXING_ENABLED: "false"
       TRUST_PROXY: "172.16.0.0/12,192.168.0.0/16"
       LOG_LEVEL: info

@@ -1,5 +1,5 @@
 publicUrl: https://agentwall.net
-contactEmail: hello@agentwall.net
+contactEmail: office@mediabridge.solutions
 indexingEnabled: true
 ingress:
   host: agentwall.net

@@ -8,7 +8,7 @@ export function configFromEnv(env = process.env) {
     databaseUrl: env.DATABASE_URL, publicUrl: url.origin, secret: env.IP_HASH_SECRET,
     adminToken: env.ADMIN_TOKEN, indexing: env.INDEXING_ENABLED === 'true',
     trustProxy: env.TRUST_PROXY && env.TRUST_PROXY !== 'false' ? env.TRUST_PROXY.split(',') : false,
-    contact: env.CONTACT_EMAIL || 'hello@agentwall.net', port: Number(env.PORT || 3000),
+    contact: env.CONTACT_EMAIL || 'office@mediabridge.solutions', port: Number(env.PORT || 3000),
     host: env.HOST || '0.0.0.0', logLevel: env.LOG_LEVEL || 'info', version: env.APP_VERSION || '1.0.0',
   };
 }

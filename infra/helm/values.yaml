@@ -7,7 +7,7 @@ imagePullSecrets:
 replicas: 1
 existingSecret: agentwall-secrets
 publicUrl: https://agentwall.net
-contactEmail: hello@agentwall.net
+contactEmail: office@mediabridge.solutions
 indexingEnabled: false
 ingress:
   enabled: true
