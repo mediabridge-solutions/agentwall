@@ -1,8 +1,16 @@
 # Favicon artwork
 
+## Current selection — restored original signal mark
+
+On September 6, 2026 the user preferred the original lime signal mark on its dark background. Browser assets are now derived from public/favicon.svg, with an opaque #111511 background: public/favicon.ico (16/32/48), public/favicon-32.png, public/favicon-192.png and public/apple-touch-icon.png (180). Homepage metadata uses stable /favicon.ico, /favicon.png (192px), and /apple-touch-icon.png URLs, without rotating query versions. The generated alternative below remains archived in public/favicon-source.png but is not selected.
+
+Google's favicon guidance checked on September 6 lists BMP/GIF/ICO/PNG/JPEG/PPM/TIFF, recommends larger than 48px, requires Googlebot access to the homepage and Googlebot-Image access to the icon, and recommends stable URLs. Original SVG-only metadata was a plausible format gap, not a proven explanation for the user's Search Console observation. Google says recrawling/processing may take days to weeks and display is not guaranteed. Source: https://developers.google.com/search/docs/appearance/favicon-in-search . Request indexing of the homepage in URL Inspection after deployment. Search Console UI property icons and organic Search appearance should not be assumed identical; an actual screenshot/inspection result is needed for a precise diagnosis.
+
+## Archived generated alternative
+
 Generated with the built-in image generation tool, September 6, 2026.
 Source: public/favicon-source.png. Browser assets: public/favicon.ico (16/32/48), public/favicon-32.png and public/apple-touch-icon.png (180).
-The old SVG is no longer selected by page metadata. Versioned icon links refresh cached references.
+Those browser asset files initially held the generated variant; they have since been replaced as described above.
 
 ## Generation prompt
 

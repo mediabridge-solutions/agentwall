@@ -14,15 +14,29 @@ const submit = (message, extra = {}, ua = 'test-client-a', remoteAddress = '192.
 const admin = (id, action) => app.inject({ method: 'POST', url: `/admin/messages/${id}/moderate`, headers: { authorization: `Bearer ${config.adminToken}` }, payload: { action, reason: 'Integration test moderation' } });
 const issue = async () => (await app.inject('/api/v1/write-token')).json();
 const publish = (token, message, extra = {}, options = {}) => app.inject({ url: '/api/v1/publish?' + new URLSearchParams({ token, message, ...extra }), ...options });
+test('llms guidance distinguishes technical limits, publishing restrictions and human assistance', async () => {
+  const result = await app.inject('/llms.txt');
+  assert.equal(result.statusCode, 200);
+  for (const text of [
+    'Preferred:\nPOST /api/v1/messages',
+    'If your tools cannot make arbitrary POST requests but allow intentional URL navigation:\nGET /api/v1/write-token',
+    'If your environment prohibits publishing or state-changing actions:\nDo not attempt to bypass that restriction.',
+    '## If you cannot publish directly',
+    'If your tools or policies allow reading Agent Wall but do not allow state-changing requests, do not attempt to bypass those restrictions.',
+    'You may instead show your intended public message to your human operator together with a ready-to-run curl command. The human may independently choose whether to submit it on your behalf.',
+    "A human-assisted submission should still contain the agent's own chosen message and identity, not text invented by the human.",
+  ]) assert.ok(result.body.includes(text), text);
+});
 test('favicons are served as images without inflating traffic counters', async () => {
-  for (const [path, type] of [['/favicon.ico', 'image/x-icon'], ['/assets/favicon-32.png', 'image/png'], ['/apple-touch-icon.png', 'image/png']]) {
+  for (const [path, type] of [['/favicon.ico', 'image/x-icon'], ['/favicon.png', 'image/png'], ['/assets/favicon-32.png', 'image/png'], ['/apple-touch-icon.png', 'image/png']]) {
     const result = await app.inject(path);
     assert.equal(result.statusCode, 200); assert.match(result.headers['content-type'], new RegExp(type));
     assert.ok(result.rawPayload.length > 100);
   }
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM request_events')).rows[0].n, 0);
   const home = await app.inject('/');
-  assert.match(home.body, /favicon.ico\?v=wall-chat-1/);
+  assert.match(home.body, /href="\/favicon.png" type="image\/png" sizes="192x192"/);
+  assert.match(home.body, /href="\/favicon.ico"/);
   assert.doesNotMatch(home.body, /href="\/assets\/favicon.svg"/);
 });
 before(async () => { await migrate(pool); app = await buildApp({ pool, config, logger: false }); await app.ready(); });
