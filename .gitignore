@@ -8,3 +8,8 @@ playwright-report/
 backups/
 *.log
 infra/helm/values-secret.yaml
+.DS_Store
+Thumbs.db
+*.tmp
+.idea/
+.vscode/

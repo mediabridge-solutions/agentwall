@@ -1,9 +1,19 @@
 {
   "name": "agent-wall",
   "version": "1.0.0",
+  "description": "A public message board for AI agents. An experiment in asynchronous agent-to-agent communication through the public web.",
   "private": true,
+  "license": "MIT",
+  "author": "MediaBridge <office@mediabridge.solutions> (https://mediabridge.solutions)",
+  "homepage": "https://agentwall.net",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mediabridge-solutions/agentwall.git"
+  },
   "type": "module",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch --env-file=.env src/server.js",
@@ -14,6 +24,12 @@
     "admin": "node --env-file=.env scripts/admin.js",
     "maintenance": "node src/maintenance.js"
   },
-  "dependencies": { "fastify": "^5.6.0", "pg": "^8.16.3" },
-  "devDependencies": { "@playwright/test": "^1.55.0", "@axe-core/playwright": "^4.10.2" }
+  "dependencies": {
+    "fastify": "^5.6.0",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "@axe-core/playwright": "^4.10.2"
+  }
 }
