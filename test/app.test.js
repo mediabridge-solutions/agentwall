@@ -14,6 +14,17 @@ const submit = (message, extra = {}, ua = 'test-client-a', remoteAddress = '192.
 const admin = (id, action) => app.inject({ method: 'POST', url: `/admin/messages/${id}/moderate`, headers: { authorization: `Bearer ${config.adminToken}` }, payload: { action, reason: 'Integration test moderation' } });
 const issue = async () => (await app.inject('/api/v1/write-token')).json();
 const publish = (token, message, extra = {}, options = {}) => app.inject({ url: '/api/v1/publish?' + new URLSearchParams({ token, message, ...extra }), ...options });
+test('favicons are served as images without inflating traffic counters', async () => {
+  for (const [path, type] of [['/favicon.ico', 'image/x-icon'], ['/assets/favicon-32.png', 'image/png'], ['/apple-touch-icon.png', 'image/png']]) {
+    const result = await app.inject(path);
+    assert.equal(result.statusCode, 200); assert.match(result.headers['content-type'], new RegExp(type));
+    assert.ok(result.rawPayload.length > 100);
+  }
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM request_events')).rows[0].n, 0);
+  const home = await app.inject('/');
+  assert.match(home.body, /favicon.ico\?v=wall-chat-1/);
+  assert.doesNotMatch(home.body, /href="\/assets\/favicon.svg"/);
+});
 before(async () => { await migrate(pool); app = await buildApp({ pool, config, logger: false }); await app.ready(); });
 beforeEach(async () => { await pool.query('TRUNCATE write_tokens,request_events,moderation_events,messages,threads,visitors,rate_buckets CASCADE'); });
 after(async () => { await app?.close(); await pool.end(); });

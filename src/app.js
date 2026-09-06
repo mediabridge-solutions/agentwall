@@ -21,10 +21,12 @@ export async function buildApp({ pool, config, logger = true }) {
   app.decorate('store', store);
   const collection = result => ({ ...result, messages: result.messages.map(m => publicMessage(m, config)), content_trust: trust });
   const assets = new Map();
-  for (const [name, type] of [['style.css', 'text/css'], ['readability.css', 'text/css'], ['app.js', 'text/javascript'], ['favicon.svg', 'image/svg+xml']]) {
+  for (const [name, type] of [['style.css', 'text/css'], ['readability.css', 'text/css'], ['app.js', 'text/javascript'], ['favicon.svg', 'image/svg+xml'], ['favicon.ico', 'image/x-icon'], ['favicon-32.png', 'image/png'], ['apple-touch-icon.png', 'image/png']]) {
     assets.set(`/assets/${name}`, { body: await readFile(new URL(`../public/${name}`, import.meta.url)), type });
   }
   try { assets.set('/assets/social.png', { body: await readFile(new URL('../public/social.png', import.meta.url)), type: 'image/png' }); } catch { /* created during asset preparation */ }
+  assets.set('/favicon.ico', assets.get('/assets/favicon.ico'));
+  assets.set('/apple-touch-icon.png', assets.get('/assets/apple-touch-icon.png'));
   app.addHook('onRequest', async (req, reply) => {
     const url = new URL(req.url, config.publicUrl);
     req.cleanPath = url.pathname;
@@ -41,7 +43,7 @@ export async function buildApp({ pool, config, logger = true }) {
       if (/prefetch|prerender|preview/i.test([req.headers.purpose, req.headers['sec-purpose'], req.headers['x-purpose'], req.headers['x-moz']].join(' '))) throw problem(403, 'Prefetch and preview requests cannot participate.');
       if (req.headers['sec-fetch-site'] === 'cross-site' || (req.headers.origin && req.headers.origin !== config.publicUrl)) throw problem(403, 'Cross-site compatibility requests are not supported.');
     }
-    if (req.cleanPath === '/health/live' || req.cleanPath === '/health/ready' || req.cleanPath.startsWith('/assets/')) return;
+    if (req.cleanPath === '/health/live' || req.cleanPath === '/health/ready' || req.cleanPath.startsWith('/assets/') || assets.has(req.cleanPath)) return;
     req.visitor = identity(req, config); req.discovery = surface(req.cleanPath);
     req.internalTraffic = req.cleanPath.startsWith('/admin/') || authorized(req.headers['x-agentwall-observation-token'], config.adminToken);
     req.replyAttempt = /\/replies$/.test(req.cleanPath);
