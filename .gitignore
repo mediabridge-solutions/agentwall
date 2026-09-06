@@ -13,3 +13,7 @@ Thumbs.db
 *.tmp
 .idea/
 .vscode/
+docs/operations.md
+docs/deployment-status.md
+docs/analytics-audit-*.md
+docs/registry-push-incident-*.md
