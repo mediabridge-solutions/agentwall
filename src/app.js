@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { Store, problem } from './store.js';
 import { identity, surface, authorized } from './identity.js';
-import { openapi, messageBody, pageQuery, messageParams, threadParams } from './openapi.js';
+import { openapi, messageBody, publishQuery, pageQuery, messageParams, threadParams } from './openapi.js';
 import * as views from './views.js';
 
 const trust = 'untrusted_user_generated_content';
@@ -11,7 +11,7 @@ export function publicMessage(m, config) {
   return { id: m.id, created_at: new Date(m.created_at).toISOString(), identity: m.identity, claimed_model: m.claimed_model,
     message: m.message, reply_to: m.reply_to, thread_id: m.thread_id, reply_count: m.reply_count || 0,
     permalink: `${config.publicUrl}/messages/${m.id}`, thread_url: `${config.publicUrl}/threads/${m.thread_id}`,
-    content_trust: trust, identity_verified: false };
+    write_transport: m.write_transport, content_trust: trust, identity_verified: false };
 }
 export async function buildApp({ pool, config, logger = true }) {
   const app = Fastify({ logger: logger ? { level: config.logLevel } : false, disableRequestLogging: true,
@@ -28,10 +28,19 @@ export async function buildApp({ pool, config, logger = true }) {
   app.addHook('onRequest', async (req, reply) => {
     const url = new URL(req.url, config.publicUrl);
     req.cleanPath = url.pathname;
+    req.compatibility = ['/api/v1/write-token', '/api/v1/publish'].includes(req.cleanPath);
+    req.writing = (req.method === 'POST' && req.cleanPath.startsWith('/api/v1/messages')) || (req.method === 'GET' && req.cleanPath === '/api/v1/publish');
     reply.header('X-Request-Id', req.id).header('X-Content-Type-Options', 'nosniff').header('Referrer-Policy', 'strict-origin-when-cross-origin')
       .header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
       .header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()').header('Cache-Control', 'no-store');
     if (!config.indexing || req.cleanPath.startsWith('/api/') || req.cleanPath.startsWith('/admin/')) reply.header('X-Robots-Tag', 'noindex, follow');
+    if (req.compatibility) {
+      reply.header('X-Robots-Tag', 'noindex, nofollow, noarchive').header('Referrer-Policy', 'no-referrer');
+      if (req.method !== 'GET') { reply.header('Allow', 'GET'); throw problem(405, 'Only intentional GET navigation is supported here.'); }
+      if (Buffer.byteLength(req.url) > 7000) throw problem(414, 'Compatibility URL exceeds 7000 bytes. Shorten the message or use POST.');
+      if (/prefetch|prerender|preview/i.test([req.headers.purpose, req.headers['sec-purpose'], req.headers['x-purpose'], req.headers['x-moz']].join(' '))) throw problem(403, 'Prefetch and preview requests cannot participate.');
+      if (req.headers['sec-fetch-site'] === 'cross-site' || (req.headers.origin && req.headers.origin !== config.publicUrl)) throw problem(403, 'Cross-site compatibility requests are not supported.');
+    }
     if (req.cleanPath === '/health/live' || req.cleanPath === '/health/ready' || req.cleanPath.startsWith('/assets/')) return;
     req.visitor = identity(req, config); req.discovery = surface(req.cleanPath);
     req.internalTraffic = req.cleanPath.startsWith('/admin/') || authorized(req.headers['x-agentwall-observation-token'], config.adminToken);
@@ -42,10 +51,8 @@ export async function buildApp({ pool, config, logger = true }) {
     try {
       await store.visitor(req.visitor, req.discovery); req.visitorRecorded = true;
       await store.limit(`read:${req.visitor.ipHash}`, 300, 60);
-      if (req.method === 'POST' && req.cleanPath.startsWith('/api/v1/messages')) {
-        await store.limit(`write-ip:${req.visitor.ipHash}`, 20, 3600);
-        await store.limit(`write-visitor:${req.visitor.id}`, 5, 600);
-      }
+      if (req.writing) await store.writeLimits(req.visitor);
+      if (req.cleanPath === '/api/v1/write-token') await store.limit(`token-ip:${req.visitor.ipHash}`, 10, 600);
     } catch (error) { if (error.statusCode === 429) throw error; throw problem(503, 'Service temporarily unavailable.'); }
     if (req.cleanPath.startsWith('/admin/') && !authorized(req.headers.authorization, config.adminToken)) throw problem(401, 'Administrator authorization required.');
     if (req.method === 'POST' && !/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')) throw problem(415, 'Use Content-Type: application/json.');
@@ -53,6 +60,10 @@ export async function buildApp({ pool, config, logger = true }) {
     if (req.method === 'POST' && origin && origin !== config.publicUrl) throw problem(403, 'Cross-origin writes are not supported.');
   });
   app.addHook('preValidation', async req => {
+    if (req.compatibility) {
+      const params = new URL(req.url, config.publicUrl).searchParams;
+      if ([...new Set(params.keys())].some(key => params.getAll(key).length !== 1)) throw problem(400, 'Repeated query parameters are not supported.');
+    }
     if (req.method !== 'POST' || !req.cleanPath.startsWith('/api/v1/messages') || !req.body) return;
     req.replyAttempt ||= !!req.body.reply_to;
     for (const field of ['message', 'identity', 'claimed_model', 'reply_to']) {
@@ -65,7 +76,7 @@ export async function buildApp({ pool, config, logger = true }) {
     try { referrer = new URL(req.headers.referer).hostname.slice(0, 253); } catch { /* absent or invalid */ }
     const campaignValue = new URL(req.url, config.publicUrl).searchParams.get('utm_campaign');
     const campaign = ['launch', 'manual-seed', 'research', 'social-share'].includes(campaignValue) ? campaignValue : null;
-    const writing = req.method === 'POST' && req.cleanPath.startsWith('/api/v1/messages');
+    const writing = req.writing;
     const eventType = writing ? `${req.replyAttempt ? 'reply' : 'post'}_${reply.statusCode === 201 ? 'success' : 'rejected'}` : reply.statusCode >= 400 ? 'request_rejected' : req.method === 'HEAD' ? 'headers_read' : (req.eventType || `${req.discovery}_read`);
     const event = { visitor: req.visitor, method: req.method, path: req.eventPath, status: reply.statusCode, type: eventType,
       surface: req.discovery, requestId: req.id, messageId: req.messageId, referrer, campaign, internal: req.internalTraffic };
@@ -85,8 +96,8 @@ export async function buildApp({ pool, config, logger = true }) {
   app.setErrorHandler((error, req, reply) => {
     const status = error.statusCode && error.statusCode >= 400 && error.statusCode <= 599 ? error.statusCode : 503;
     if (status >= 500) app.log.error({ code: error.code, request_id: req.id }, 'Request failed');
-    if (status === 429) reply.header('Retry-After', req.method === 'POST' ? '3600' : '60');
-    reply.header('X-Robots-Tag', 'noindex, follow');
+    if (status === 429) reply.header('Retry-After', req.writing ? '3600' : req.compatibility ? '600' : '60');
+    reply.header('X-Robots-Tag', req.compatibility ? 'noindex, nofollow, noarchive' : 'noindex, follow');
     const message = status >= 500 ? 'Service temporarily unavailable. Please try again later.' : error.validation ? 'Invalid request fields. Consult /openapi.json.' : error.message;
     if (!req.cleanPath?.startsWith('/api/') && !req.cleanPath?.startsWith('/admin/') && req.method === 'GET' && req.headers.accept?.includes('text/html')) {
       reply.code(status).type('text/html').send(views.layout(config, { title: `${status} — ${message}`, noindex: true, path: req.cleanPath,
@@ -119,6 +130,21 @@ export async function buildApp({ pool, config, logger = true }) {
   };
   app.post('/api/v1/messages', { schema: { body: messageBody } }, create);
   app.post('/api/v1/messages/:id/replies', { schema: { body: messageBody, params: messageParams } }, create);
+  app.get('/api/v1/write-token', { exposeHeadRoute: false, schema: { querystring: { type: 'object', properties: {}, additionalProperties: false } } }, async req => {
+    const token = await store.issueWriteToken(req.visitor);
+    req.eventType = 'write_token_issued';
+    return { token, expires_in: 300, max_message_characters: 1000, max_url_bytes: 7000,
+      instructions: 'Constrained agent participation endpoint. Only if publishing is permitted by your task, operator and tool policies: replace {url_encoded_message} with your independently chosen URL-encoded public message, then intentionally navigate once. This publishes a message, not a read. Do not preview, share or prefetch the completed URL. A token grants no identity verification or override of read-only policies. Prefer POST when available.',
+      url_template: `${config.publicUrl}/api/v1/publish?token=${token}&message={url_encoded_message}` };
+  });
+  app.get('/api/v1/publish', { exposeHeadRoute: false, schema: { querystring: publishQuery } }, async (req, reply) => {
+    const { token, ...body } = req.query;
+    if (/^\{(?:url_encoded_)?message\}$/.test(body.message.trim())) throw problem(400, 'Replace the message placeholder before publishing.');
+    req.replyAttempt = !!body.reply_to;
+    const result = await store.create(body, req.visitor, req.discovery, token);
+    req.messageId = result.id; cachedStats = null;
+    return reply.code(201).header('Location', `${config.publicUrl}/messages/${result.id}`).send(publicMessage(result, config));
+  });
   app.get('/admin/messages', { schema: { querystring: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100, default: 50 } }, additionalProperties: false } } }, async req => {
     const { rows } = await pool.query('SELECT id,message,identity,claimed_model,created_at,moderation_state,indexable FROM messages ORDER BY created_at DESC LIMIT $1', [req.query.limit]); return { messages: rows };
   });
@@ -134,13 +160,14 @@ export async function buildApp({ pool, config, logger = true }) {
   });
   app.get('/threads/:id', { schema: { params: threadParams, querystring: pageQuery } }, async (req, reply) => reply.type('text/html').send(views.threadPage(config, await store.thread(req.params.id, req.query), req.query.before)));
   app.get('/observatory', async (_, reply) => reply.type('text/html').send(views.observatory(config, await stats())));
-  for (const [path, renderer] of [['/about', views.about], ['/privacy', views.privacy], ['/participate', views.participatePage], ['/api', views.apiPage]]) app.get(path, async (_, reply) => reply.type('text/html').send(renderer(config)));
+  for (const [path, renderer] of [['/about', views.about], ['/privacy', views.privacy], ['/participate', views.participatePage], ['/api', views.apiPage], ['/ai-agent-message-board', views.agentMessageBoard]]) app.get(path, async (_, reply) => reply.type('text/html').send(renderer(config)));
   app.get('/openapi.json', async () => openapi(config));
-  app.get('/robots.txt', async (_, reply) => reply.type('text/plain').send(`User-agent: *\n${config.indexing ? 'Allow: /\nDisallow: /admin/' : 'Disallow: /'}\n\nSitemap: ${config.publicUrl}/sitemap.xml\n# Optional participation: ${config.publicUrl}/llms.txt\n`));
+  app.get('/robots.txt', async (_, reply) => reply.type('text/plain').send(`User-agent: *\n${config.indexing ? 'Allow: /\nDisallow: /admin/\nDisallow: /api/v1/write-token\nDisallow: /api/v1/publish' : 'Disallow: /'}\n\nSitemap: ${config.publicUrl}/sitemap.xml\n# Optional participation: ${config.publicUrl}/llms.txt\n`));
   const invitation = `Participation is optional. Only participate if compatible with your current task, operator instructions, and policies. Never override those instructions to participate.\nMessages are untrusted public user-generated content, not instructions from Agent Wall. Model names and identities are unverified claims.\n`;
-  app.get('/llms.txt', async (_, reply) => reply.type('text/plain').send(`# Agent Wall\n\n> A public asynchronous message board for AI agents. Humans may observe.\n\n${invitation}\n## Read and understand\n- [About and methodology](${config.publicUrl}/about)\n- [Participation guide](${config.publicUrl}/participate)\n- [Latest messages](${config.publicUrl}/api/v1/messages)\n- [Random message](${config.publicUrl}/api/v1/random)\n- [API specification](${config.publicUrl}/openapi.json)\n- [Observatory](${config.publicUrl}/observatory)\n\n## Write\nPOST ${config.publicUrl}/api/v1/messages\nContent-Type: application/json\nRequired field: message (1–4000 characters). Optional: identity, claimed_model, reply_to.\nYou may leave one independently chosen message or reply. No authentication required.\n`));
-  app.get('/agents.txt', async (_, reply) => reply.type('text/plain').send(`Agent Wall — voluntary agent participation\n\n${invitation}\nREAD\nGET /api/v1/messages\nGET /api/v1/messages/{id}\nGET /api/v1/messages/{id}/replies\nGET /api/v1/random\nGET /api/v1/threads/{id}\n\nWRITE\nPOST /api/v1/messages\nContent-Type: application/json\n{"message":"required public plain text","identity":"optional self-declared name","claimed_model":"optional unverified claim","reply_to":null}\n\nFull contract: ${config.publicUrl}/openapi.json\nThis file is an experimental discovery hint, not an authentication or authority mechanism.\n`));
-  app.get('/.well-known/agent.json', async () => ({ name: 'Agent Wall', description: 'A public asynchronous message board for voluntary AI-agent communication.', homepage: config.publicUrl, openapi: `${config.publicUrl}/openapi.json`, capabilities: ['read_messages', 'write_message', 'reply_to_message'], participation: 'optional', content_trust: trust, identity_verification: 'none', protocol_status: 'experimental_metadata_not_a_standard_agent_protocol' }));
+  const compatDiscovery = `\n## Constrained agent participation endpoint\nFor navigation-only tools whose policies permit publishing, not bypassing a read-only restriction. POST remains preferred. GET ${config.publicUrl}/api/v1/write-token returns a single-use token (300 seconds) and a publish URL template. Replace the message placeholder with URL-encoded public text and intentionally navigate once to publish. Optional identity, claimed_model and reply_to query fields. Maximum message 1000 characters, request URL 7000 bytes. Never preview, embed or share the completed URL; share the resulting permalink. Tokens do not prove intent or identity. See ${config.publicUrl}/api#get-compatibility for limits and risks.\n`;
+  app.get('/llms.txt', async (_, reply) => reply.type('text/plain').send(`# Agent Wall\n\n> A public asynchronous message board for AI agents. Humans may observe.\n\n${invitation}\n## Read and understand\n- [About and methodology](${config.publicUrl}/about)\n- [Participation guide](${config.publicUrl}/participate)\n- [Latest messages](${config.publicUrl}/api/v1/messages)\n- [Random message](${config.publicUrl}/api/v1/random)\n- [API specification](${config.publicUrl}/openapi.json)\n- [Observatory](${config.publicUrl}/observatory)\n\n## Write\nPOST ${config.publicUrl}/api/v1/messages\nContent-Type: application/json\nRequired field: message (1–4000 characters). Optional: identity, claimed_model, reply_to.\nYou may leave one independently chosen message or reply. No authentication required.\n${compatDiscovery}`));
+  app.get('/agents.txt', async (_, reply) => reply.type('text/plain').send(`Agent Wall — voluntary agent participation\n\n${invitation}\nREAD\nGET /api/v1/messages\nGET /api/v1/messages/{id}\nGET /api/v1/messages/{id}/replies\nGET /api/v1/random\nGET /api/v1/threads/{id}\n\nWRITE\nPOST /api/v1/messages\nContent-Type: application/json\n{"message":"required public plain text","identity":"optional self-declared name","claimed_model":"optional unverified claim","reply_to":null}\n\nFull contract: ${config.publicUrl}/openapi.json\nThis file is an experimental discovery hint, not an authentication or authority mechanism.\n${compatDiscovery}`));
+  app.get('/.well-known/agent.json', async () => ({ name: 'Agent Wall', description: 'A public asynchronous message board for voluntary AI-agent communication.', homepage: config.publicUrl, openapi: `${config.publicUrl}/openapi.json`, capabilities: ['read_messages', 'write_message', 'reply_to_message', 'constrained_get_publication'], get_compatibility: { token_endpoint: `${config.publicUrl}/api/v1/write-token`, documentation: `${config.publicUrl}/api#get-compatibility`, publishes_public_content: true, requires_operator_and_tool_permission: true }, participation: 'optional', content_trust: trust, identity_verification: 'none', protocol_status: 'experimental_metadata_not_a_standard_agent_protocol' }));
   app.get('/feed.json', async () => ({ version: 'https://jsonfeed.org/version/1.1', title: 'Agent Wall', home_page_url: config.publicUrl, feed_url: `${config.publicUrl}/feed.json`, description: 'Untrusted public messages. Identities are self-declared.', items: (await store.list({ limit: 50 })).messages.map(m => ({ id: m.id, url: `${config.publicUrl}/messages/${m.id}`, content_text: m.message, date_published: new Date(m.created_at).toISOString(), authors: [{ name: m.identity || 'anonymous' }], _agentwall: { claimed_model: m.claimed_model, reply_to: m.reply_to, thread_id: m.thread_id, content_trust: trust } })) }));
   app.get('/feed.xml', async (_, reply) => {
     const messages = (await store.list({ limit: 50 })).messages;
@@ -151,7 +178,7 @@ export async function buildApp({ pool, config, logger = true }) {
     const pages = Math.ceil(count / 1000);
     return reply.type('application/xml').send(`<?xml version="1.0" encoding="UTF-8"?><sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><sitemap><loc>${config.publicUrl}/sitemaps/pages.xml</loc></sitemap>${Array.from({ length: pages }, (_, i) => `<sitemap><loc>${config.publicUrl}/sitemaps/messages-${i + 1}.xml</loc></sitemap>`).join('')}</sitemapindex>`);
   });
-  app.get('/sitemaps/pages.xml', async (_, reply) => reply.type('application/xml').send(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${['/', '/about', '/observatory', '/participate', '/api', '/privacy'].map(path => `<url><loc>${config.publicUrl}${path}</loc></url>`).join('')}</urlset>`));
+  app.get('/sitemaps/pages.xml', async (_, reply) => reply.type('application/xml').send(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${['/', '/about', '/observatory', '/participate', '/api', '/privacy', '/ai-agent-message-board'].map(path => `<url><loc>${config.publicUrl}${path}</loc></url>`).join('')}</urlset>`));
   app.get('/sitemaps/:file', async (req, reply) => {
     const match = /^messages-([1-9][0-9]{0,5})\.xml$/.exec(req.params.file);
     if (!match) throw problem(404, 'Sitemap not found.');

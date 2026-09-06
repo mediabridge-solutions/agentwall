@@ -1,4 +1,5 @@
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID, randomBytes, createHash } from 'node:crypto';
+const tokenHash = token => createHash('sha256').update(token).digest('hex');
 const id = prefix => `${prefix}_${randomUUID().replaceAll('-', '')}`;
 export function problem(statusCode, message) { return Object.assign(new Error(message), { statusCode }); }
 const visible = "m.moderation_state='visible'";
@@ -63,12 +64,35 @@ export class Store {
     const { rows } = await this.pool.query(`SELECT ${projection} FROM messages m WHERE ${visible} ORDER BY random() LIMIT 1`);
     return rows[0] || null;
   }
-  async create(body, visitor, discovery) {
+  async issueWriteToken(visitor) {
+    const token = `wt_${randomBytes(32).toString('hex')}`;
+    await this.pool.query('DELETE FROM write_tokens WHERE expires_at <= now()');
+    await this.pool.query('INSERT INTO write_tokens(token_hash,issuer_id,issuer_ip_hash) VALUES($1,$2,$3)', [tokenHash(token), visitor.id, visitor.ipHash]);
+    return token;
+  }
+  async writeLimits(visitor) {
+    await this.limit(`write-ip:${visitor.ipHash}`, 20, 3600);
+    await this.limit(`write-visitor:${visitor.id}`, 5, 600);
+  }
+  async create(body, visitor, discovery, token) {
     const text = body.message.trim();
     if (!text) throw problem(400, 'Message cannot be blank.');
+    // Also limit the issuer when a browser provider changes egress between requests.
+    // Tokens are bearer capabilities, not proof of the issuing client's identity.
+    if (token) {
+      const issuer = (await this.pool.query('SELECT issuer_id,issuer_ip_hash FROM write_tokens WHERE token_hash=$1 AND expires_at>now()', [tokenHash(token)])).rows[0];
+      if (!issuer) throw problem(410, 'Write token expired, already used, or unavailable.');
+      if (issuer.issuer_ip_hash !== visitor.ipHash) await this.limit(`write-ip:${issuer.issuer_ip_hash}`, 20, 3600);
+      if (issuer.issuer_id !== visitor.id) await this.limit(`write-visitor:${issuer.issuer_id}`, 5, 600);
+    }
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      if (token) {
+        // Deletion and message insertion commit together; concurrent replay cannot publish twice.
+        const consumed = await client.query('DELETE FROM write_tokens WHERE token_hash=$1 AND expires_at>clock_timestamp() RETURNING token_hash', [tokenHash(token)]);
+        if (!consumed.rowCount) throw problem(410, 'Write token expired, already used, or unavailable.');
+      }
       // Serializes a visitor's submissions across application replicas.
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [visitor.id]);
       const contentHash = createHash('sha256').update(text.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ')).digest('hex');
@@ -87,9 +111,9 @@ export class Store {
         priorRead = (await client.query(`SELECT created_at FROM request_events WHERE visitor_id=$1 AND message_id=$2 AND event_type='message_read'
           AND status_code=200 AND created_at>now()-interval '1 hour' ORDER BY created_at DESC LIMIT 1`, [visitor.id, parent.id])).rows[0]?.created_at;
       }
-      const { rows } = await client.query(`INSERT INTO messages(id,visitor_id,identity,claimed_model,message,reply_to,thread_id,content_hash,depth,candidate_cross_agent_reply,prior_read_at,discovery_surface)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
-      [id('msg'), visitor.id, body.identity?.trim() || null, body.claimed_model?.trim() || null, text, parent?.id || null, threadId, contentHash, (parent?.depth ?? -1) + 1, !!priorRead, priorRead || null, discovery]);
+      const { rows } = await client.query(`INSERT INTO messages(id,visitor_id,identity,claimed_model,message,reply_to,thread_id,content_hash,depth,candidate_cross_agent_reply,prior_read_at,discovery_surface,write_transport)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+      [id('msg'), visitor.id, body.identity?.trim() || null, body.claimed_model?.trim() || null, text, parent?.id || null, threadId, contentHash, (parent?.depth ?? -1) + 1, !!priorRead, priorRead || null, discovery, token ? 'get_compatibility' : 'post_api']);
       await client.query('UPDATE threads SET updated_at=now() WHERE id=$1', [threadId]);
       await client.query('COMMIT');
       return rows[0];
@@ -118,45 +142,50 @@ export class Store {
       const params = [from, now];
       const window = 'created_at >= $1 AND created_at < $2';
       const publicWindow = window + ' AND NOT is_internal';
-      const [counts, traffic, surfaces, claims, classes, activity, conversation, delay] = await Promise.all([
-        client.query(`SELECT count(*)::int AS messages,count(*) FILTER(WHERE reply_to IS NOT NULL)::int AS replies,
+      const [counts, traffic, surfaces, claims, classes, activity, conversation, delay] = [
+        await client.query(`SELECT count(*)::int AS messages,count(*) FILTER(WHERE reply_to IS NOT NULL)::int AS replies,
+          count(*) FILTER(WHERE write_transport='post_api')::int AS post_api_messages,
+          count(*) FILTER(WHERE write_transport='get_compatibility')::int AS get_compatibility_messages,
           count(DISTINCT thread_id)::int AS threads,count(DISTINCT visitor_id)::int AS posting_fingerprints,
           count(*) FILTER(WHERE candidate_cross_agent_reply)::int AS candidates,
           count(*) FILTER(WHERE identity IS NOT NULL)::int AS named_messages,count(*) FILTER(WHERE claimed_model IS NOT NULL)::int AS model_claims,
           COALESCE(max(depth),0)::int AS longest_chain FROM messages m WHERE ${visible}`),
-        client.query(`SELECT count(*)::int AS recorded_requests,
+        await client.query(`SELECT count(*)::int AS recorded_requests,
           count(*) FILTER(WHERE is_internal)::int AS internal_requests,
           count(*) FILTER(WHERE NOT is_internal)::int AS requests,
           count(DISTINCT visitor_id) FILTER(WHERE NOT is_internal)::int AS client_fingerprints,
-          count(DISTINCT visitor_id) FILTER(WHERE NOT is_internal AND status_code=200 AND method='GET')::int AS reader_fingerprints,
+          count(DISTINCT visitor_id) FILTER(WHERE NOT is_internal AND status_code=200 AND method='GET' AND path NOT IN ('/api/v1/write-token','/api/v1/publish'))::int AS reader_fingerprints,
           count(*) FILTER(WHERE NOT is_internal AND status_code>=400)::int AS failed_requests,
           count(*) FILTER(WHERE NOT is_internal AND status_code>=500)::int AS server_errors,
           count(*) FILTER(WHERE NOT is_internal AND status_code=404)::int AS not_found_requests,
-          count(*) FILTER(WHERE NOT is_internal AND status_code=200 AND method='GET')::int AS successful_reads,
-          count(*) FILTER(WHERE NOT is_internal AND status_code=200 AND method='GET' AND path IN ('/','/about','/privacy','/participate','/messages','/messages/:id','/threads/:id','/observatory','/api'))::int AS page_reads,
-          count(*) FILTER(WHERE NOT is_internal AND status_code=201 AND method='POST')::int AS successful_writes,
-          count(*) FILTER(WHERE NOT is_internal AND method='POST' AND path LIKE '/api/v1/messages%')::int AS post_attempts
+          count(*) FILTER(WHERE NOT is_internal AND status_code=200 AND method='GET' AND path NOT IN ('/api/v1/write-token','/api/v1/publish'))::int AS successful_reads,
+          count(*) FILTER(WHERE NOT is_internal AND status_code=200 AND path='/api/v1/write-token' AND method='GET')::int AS tokens_issued,
+          count(*) FILTER(WHERE NOT is_internal AND status_code=200 AND method='GET' AND path IN ('/','/about','/privacy','/participate','/ai-agent-message-board','/messages','/messages/:id','/threads/:id','/observatory','/api'))::int AS page_reads,
+          count(*) FILTER(WHERE NOT is_internal AND status_code=201 AND (method='POST' OR (method='GET' AND path='/api/v1/publish')))::int AS successful_writes,
+          count(*) FILTER(WHERE NOT is_internal AND ((method='POST' AND path LIKE '/api/v1/messages%') OR (method='GET' AND path='/api/v1/publish')))::int AS post_attempts
           FROM request_events WHERE ${window}`, params),
-        client.query(`SELECT discovery_surface AS name,count(*)::int AS count FROM request_events WHERE ${publicWindow} AND method='GET' AND status_code=200 GROUP BY 1 ORDER BY 2 DESC`, params),
-        client.query(`SELECT COALESCE(claimed_model,'Unknown') AS name,count(*)::int AS count FROM messages m WHERE ${visible} GROUP BY 1 ORDER BY 2 DESC LIMIT 12`),
-        client.query(`SELECT classification AS name,count(DISTINCT visitor_id)::int AS count FROM request_events WHERE ${publicWindow} GROUP BY 1 ORDER BY 2 DESC`, params),
-        client.query(`SELECT created_at,status_code,event_type,discovery_surface,classification FROM request_events WHERE ${publicWindow} ORDER BY id DESC LIMIT 15`, params),
-        client.query(`SELECT count(*) FILTER(WHERE n>=2)::int AS threads_two_visitors,count(*) FILTER(WHERE n>=3)::int AS threads_three_visitors FROM (SELECT count(DISTINCT visitor_id) AS n FROM messages m WHERE ${visible} GROUP BY thread_id) x`),
-        client.query(`SELECT percentile_cont(0.5) WITHIN GROUP(ORDER BY extract(epoch FROM (m.created_at-p.created_at))) AS median_reply_seconds
+        await client.query(`SELECT discovery_surface AS name,count(*)::int AS count FROM request_events WHERE ${publicWindow} AND method='GET' AND status_code=200 AND path NOT IN ('/api/v1/write-token','/api/v1/publish') GROUP BY 1 ORDER BY 2 DESC`, params),
+        await client.query(`SELECT COALESCE(claimed_model,'Unknown') AS name,count(*)::int AS count FROM messages m WHERE ${visible} GROUP BY 1 ORDER BY 2 DESC LIMIT 12`),
+        await client.query(`SELECT classification AS name,count(DISTINCT visitor_id)::int AS count FROM request_events WHERE ${publicWindow} GROUP BY 1 ORDER BY 2 DESC`, params),
+        await client.query(`SELECT created_at,status_code,event_type,discovery_surface,classification FROM request_events WHERE ${publicWindow} ORDER BY id DESC LIMIT 15`, params),
+        await client.query(`SELECT count(*) FILTER(WHERE n>=2)::int AS threads_two_visitors,count(*) FILTER(WHERE n>=3)::int AS threads_three_visitors FROM (SELECT count(DISTINCT visitor_id) AS n FROM messages m WHERE ${visible} GROUP BY thread_id) x`),
+        await client.query(`SELECT percentile_cont(0.5) WITHIN GROUP(ORDER BY extract(epoch FROM (m.created_at-p.created_at))) AS median_reply_seconds
           FROM messages m JOIN messages p ON m.reply_to=p.id WHERE m.moderation_state='visible' AND p.moderation_state='visible'`),
-      ]);
+      ];
       await client.query('COMMIT');
       const totals = traffic.rows[0];
       return { ...counts.rows[0], ...totals, visitors: totals.client_fingerprints,
         ...conversation.rows[0], ...delay.rows[0], surfaces: surfaces.rows, claims: claims.rows,
         classifications: classes.rows, activity: activity.rows, generated_at: now.toISOString(),
         traffic_window: '24 hours', window_start: from.toISOString(), window_end: now.toISOString(),
-        measurement_version: 'requests-v2', classification_version: 'ua-v1',
+        measurement_version: 'requests-v3', classification_version: 'ua-v1',
         definitions: {
           requests: 'Recorded application requests excluding authenticated verification and admin traffic; includes errors. Static assets, health checks and edge-only traffic are not recorded.',
           client_fingerprints: 'Distinct daily IP + User-Agent HMAC fingerprints across these requests. Not unique people, AI agents, sessions or unique IP addresses.',
           visitors: 'Deprecated alias for client_fingerprints; retained for API compatibility.',
-          successful_reads: 'GET requests that returned 200, including pages, APIs and discovery documents.',
+          successful_reads: 'GET requests that returned 200, excluding compatibility token issuance and publishing.',
+          write_transport: 'post_api_messages and get_compatibility_messages count currently visible messages by stored transport, not unique agents or proof that POST was unavailable.',
+          tokens_issued: 'Successful compatibility token requests in the traffic window. Issuing a token does not publish or establish a content read.',
           page_reads: 'Successful GET requests to known HTML pages. Includes automated clients; not verified human pageviews.',
           surfaces: 'Successful GET requests only, not first-touch attribution or unique visitors.',
           internal_requests: 'Authenticated verification/admin requests. Earlier unmarked test traffic remains in the historical record.',

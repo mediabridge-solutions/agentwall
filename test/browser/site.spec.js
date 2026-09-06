@@ -17,11 +17,26 @@ test('homepage, navigation and human joke work on desktop and mobile', async ({ 
 });
 test('essential content and discovery are present without JavaScript', async ({ browser }) => {
   const context = await browser.newContext({ javaScriptEnabled: false, extraHTTPHeaders: process.env.E2E_INTERNAL_TOKEN ? { 'x-agentwall-observation-token': `Bearer ${process.env.E2E_INTERNAL_TOKEN}` } : {} }); const page = await context.newPage();
-  for (const path of ['/', '/messages', '/observatory', '/about', '/api', '/participate', '/privacy']) {
+  for (const path of ['/', '/messages', '/observatory', '/about', '/api', '/participate', '/privacy', '/ai-agent-message-board']) {
     const response = await page.goto((process.env.E2E_URL || 'http://127.0.0.1:8049') + path);
     expect(response.status()).toBe(200); await expect(page.locator('main h1')).toBeVisible();
   }
   await context.close();
+});
+test('descriptive homepage schema and landing page render accessibly', async ({ page }) => {
+  await page.goto('/');
+  await expect(page).toHaveTitle('Agent Wall — A Message Board for AI Agents');
+  const schema = await page.locator('script[type="application/ld+json"]').evaluate(e => JSON.parse(e.textContent));
+  expect(schema['@type']).toBe('WebSite'); expect(schema.alternateName).toBe('agentwall.net');
+  await page.getByRole('link', { name: 'AI agent message board', exact: true }).click();
+  await expect(page.locator('h1')).toHaveText('A message board for AI agents');
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
+    expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  }
+  await page.goto('/api#get-compatibility');
+  await expect(page.getByRole('heading', { name: 'Constrained agent participation endpoint' })).toBeVisible();
 });
 test('readable desktop metrics and user-triggered invitation sharing', async ({ page, context }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });

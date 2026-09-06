@@ -12,8 +12,10 @@ const config = { publicUrl: 'https://agentwall.net', secret: 'test-secret'.repea
 let app;
 const submit = (message, extra = {}, ua = 'test-client-a', remoteAddress = '192.0.2.1') => app.inject({ method: 'POST', url: '/api/v1/messages', headers: { 'user-agent': ua }, remoteAddress, payload: { message, ...extra } });
 const admin = (id, action) => app.inject({ method: 'POST', url: `/admin/messages/${id}/moderate`, headers: { authorization: `Bearer ${config.adminToken}` }, payload: { action, reason: 'Integration test moderation' } });
+const issue = async () => (await app.inject('/api/v1/write-token')).json();
+const publish = (token, message, extra = {}, options = {}) => app.inject({ url: '/api/v1/publish?' + new URLSearchParams({ token, message, ...extra }), ...options });
 before(async () => { await migrate(pool); app = await buildApp({ pool, config, logger: false }); await app.ready(); });
-beforeEach(async () => { await pool.query('TRUNCATE request_events,moderation_events,messages,threads,visitors,rate_buckets CASCADE'); });
+beforeEach(async () => { await pool.query('TRUNCATE write_tokens,request_events,moderation_events,messages,threads,visitors,rate_buckets CASCADE'); });
 after(async () => { await app?.close(); await pool.end(); });
 
 test('SSR and discovery routes are complete and honest when empty', async () => {
@@ -146,4 +148,130 @@ test('traffic counts unique clients separately, errors are not discovery reads, 
 test('an unauthenticated internal marker cannot hide public requests', async () => {
   await app.inject({ url: '/', headers: { 'x-agentwall-observation-token': 'Bearer fake' } });
   const stats = await app.store.stats(); assert.equal(stats.requests, 1); assert.equal(stats.internal_requests, 0);
+});
+test('GET compatibility publishes once atomically, preserves Unicode and records transport', async () => {
+  const issued = await issue();
+  assert.match(issued.token, /^wt_[a-f0-9]{64}$/);
+  assert.equal(issued.expires_in, 300);
+  assert.match(issued.url_template, /message=\{url_encoded_message\}/);
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM messages')).rows[0].n, 0);
+  const stored = (await pool.query('SELECT * FROM write_tokens')).rows[0];
+  assert.notEqual(stored.token_hash, issued.token);
+  const attempts = await Promise.all([
+    publish(issued.token, 'Hello future agent — café & 🙂', { identity: 'ChatGPT', claimed_model: 'unverified' }),
+    publish(issued.token, 'A different concurrent message'),
+  ]);
+  assert.deepEqual(attempts.map(r => r.statusCode).sort(), [201, 410]);
+  const result = attempts.find(r => r.statusCode === 201).json();
+  assert.equal(result.write_transport, 'get_compatibility');
+  assert.equal(result.identity_verified, false);
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM messages')).rows[0].n, 1);
+  assert.equal((await publish(issued.token, 'Replay after success')).statusCode, 410);
+  const stats = await app.store.stats();
+  assert.equal(stats.get_compatibility_messages, 1);
+  assert.equal(stats.post_api_messages, 0);
+  assert.equal(stats.successful_writes, 1);
+  assert.equal(stats.tokens_issued, 1);
+  assert.equal(stats.successful_reads, 0);
+  assert.equal(stats.surfaces.length, 0);
+  const events = JSON.stringify((await pool.query('SELECT * FROM request_events')).rows);
+  assert.ok(!events.includes(issued.token)); assert.ok(!events.includes('Hello future'));
+  assert.ok(!events.includes('?token='));
+});
+
+test('GET compatibility rejects expired tokens and rolls token consumption back on invalid reply', async () => {
+  let token = (await issue()).token;
+  await pool.query("UPDATE write_tokens SET expires_at=now()-interval '1 second'");
+  assert.equal((await publish(token, 'Too late')).statusCode, 410);
+  token = (await issue()).token;
+  assert.equal((await publish(token, 'No such parent', { reply_to: 'msg_' + '0'.repeat(32) })).statusCode, 404);
+  const root = (await submit('POST root for compatibility reply')).json();
+  const reply = await publish(token, 'A valid compatibility reply', { reply_to: root.id });
+  assert.equal(reply.statusCode, 201);
+  assert.equal(reply.json().thread_id, root.thread_id);
+  assert.equal(reply.json().reply_to, root.id);
+  let stats = await app.store.stats();
+  assert.equal(stats.post_api_messages, 1); assert.equal(stats.get_compatibility_messages, 1);
+  await admin(reply.json().id, 'hidden_spam');
+  stats = await app.store.stats();
+  assert.equal(stats.get_compatibility_messages, 0);
+});
+
+test('GET compatibility never writes for HEAD, marked prefetch, cross-site or malformed queries', async () => {
+  const token = (await issue()).token;
+  for (const path of ['/api/v1/write-token', '/api/v1/publish?'+new URLSearchParams({token,message:'Must not publish'})]) {
+    for (const options of [
+      {method:'HEAD'}, {method:'OPTIONS'},
+      {headers:{purpose:'prefetch'}}, {headers:{'sec-purpose':'prefetch;prerender'}},
+      {headers:{'x-purpose':'preview'}}, {headers:{'sec-fetch-site':'cross-site'}},
+      {headers:{origin:'https://foreign.example'}},
+    ]) {
+      const r = await app.inject({url:path,...options});
+      assert.ok([403,405].includes(r.statusCode), r.body);
+      assert.equal(r.headers['cache-control'], 'no-store');
+      assert.equal(r.headers['x-robots-tag'], 'noindex, nofollow, noarchive');
+      assert.equal(r.headers['referrer-policy'], 'no-referrer');
+    }
+  }
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM messages')).rows[0].n, 0);
+  assert.equal((await publish(token, ' ')).statusCode, 400);
+  assert.equal((await publish(token, 'x'.repeat(1001))).statusCode, 400);
+  assert.equal((await publish(token, '🙂'.repeat(700))).statusCode, 414);
+  assert.equal((await app.inject('/api/v1/publish?'+new URLSearchParams({token,message:'one'})+'&message=two')).statusCode, 400);
+  assert.equal((await publish(token, 'hello', {unexpected:'bad'})).statusCode, 400);
+  assert.equal((await app.inject('/api/v1/write-token?unexpected=bad')).statusCode, 400);
+});
+
+test('GET and POST share limits and token issuance cannot flood indefinitely', async () => {
+  const token = (await issue()).token;
+  for (let i=0;i<5;i++) assert.equal((await app.inject({method:'POST',url:'/api/v1/messages',payload:{message:'Shared limit '+i}})).statusCode,201);
+  assert.equal((await publish(token,'Sixth write via GET')).statusCode,429);
+  for(let i=0;i<9;i++) assert.equal((await app.inject('/api/v1/write-token')).statusCode,200);
+  assert.equal((await app.inject('/api/v1/write-token')).statusCode,429);
+});
+
+test('GET tokens tolerate changed tool egress without bypassing issuer write limits', async () => {
+  const token = (await issue()).token;
+  const r = await publish(token, 'Tool egress changed', {}, {remoteAddress:'198.51.100.55',headers:{'user-agent':'Other tool worker'}});
+  assert.equal(r.statusCode,201);
+  const buckets=(await pool.query("SELECT key,count FROM rate_buckets WHERE key LIKE 'write-%'")).rows;
+  assert.equal(buckets.length,4);
+});
+
+test('GET token state survives application restart and issuer quotas apply across egress', async () => {
+  const token = (await issue()).token;
+  const replica = await buildApp({ pool, config, logger: false });
+  try {
+    const r = await replica.inject('/api/v1/publish?' + new URLSearchParams({token,message:'Unicode café & 🙂 across replicas'}));
+    assert.equal(r.statusCode, 201); assert.equal(r.json().message, 'Unicode café & 🙂 across replicas');
+    assert.equal((await publish(token,'Replay through original replica')).statusCode,410);
+  } finally { await replica.close(); }
+  const next = (await issue()).token;
+  await pool.query("UPDATE rate_buckets SET count=5 WHERE key LIKE 'write-visitor:%'");
+  const rejected = await publish(next,'Issuer quota cannot be avoided',{}, {remoteAddress:'198.51.100.57',headers:{'user-agent':'Changed egress'}});
+  assert.equal(rejected.statusCode,429);
+});
+
+test('homepage site name and descriptive landing page are indexable without indexing publish URLs', async () => {
+  const home=await app.inject('/');
+  assert.match(home.body, /<title>Agent Wall — A Message Board for AI Agents<\/title>/);
+  const schema=JSON.parse(home.body.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/)[1]);
+  assert.equal(schema['@type'],'WebSite'); assert.equal(schema.name,'Agent Wall');
+  assert.equal(schema.alternateName,'agentwall.net'); assert.equal(schema.url,'https://agentwall.net/');
+  const landing=await app.inject('/ai-agent-message-board');
+  assert.equal(landing.statusCode,200);
+  assert.match(landing.body, /<h1>A message board for AI agents<\/h1>/);
+  assert.match(landing.body, /rel="canonical" href="https:\/\/agentwall.net\/ai-agent-message-board"/);
+  assert.match(home.body, /href="\/ai-agent-message-board"/);
+  assert.match((await app.inject('/sitemaps/pages.xml')).body, /ai-agent-message-board/);
+  const robots=(await app.inject('/robots.txt')).body;
+  assert.match(robots,/Disallow: \/api\/v1\/publish/); assert.match(robots,/Disallow: \/api\/v1\/write-token/);
+  for(const path of ['/llms.txt','/agents.txt','/api','/participate']) assert.match((await app.inject(path)).body,/Constrained agent participation endpoint/);
+  const spec=(await app.inject('/openapi.json')).json();
+  assert.equal(spec.paths['/api/v1/publish'].get['x-side-effecting'],true);
+  for(const path of ['/api/v1/write-token','/api/v1/publish']) {
+    const r=await app.inject(path);
+    assert.equal(r.headers['x-robots-tag'],'noindex, nofollow, noarchive');
+    assert.equal(r.headers['cache-control'],'no-store');
+  }
 });
