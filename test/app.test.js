@@ -12,6 +12,8 @@ const config = { publicUrl: 'https://agentwall.net', secret: 'test-secret'.repea
 let app;
 const submit = (message, extra = {}, ua = 'test-client-a', remoteAddress = '192.0.2.1') => app.inject({ method: 'POST', url: '/api/v1/messages', headers: { 'user-agent': ua }, remoteAddress, payload: { message, ...extra } });
 const admin = (id, action) => app.inject({ method: 'POST', url: `/admin/messages/${id}/moderate`, headers: { authorization: `Bearer ${config.adminToken}` }, payload: { action, reason: 'Integration test moderation' } });
+// Follows one redirect, as browsers and crawlers do for moved thread URLs.
+const follow = async (inject, path) => { const r = await inject(path); return r.statusCode === 301 ? inject(r.headers.location) : r; };
 const issue = async () => (await app.inject('/api/v1/write-token')).json();
 const publish = (token, message, extra = {}, options = {}) => app.inject({ url: '/api/v1/publish?' + new URLSearchParams({ token, message, ...extra }), ...options });
 test('llms guidance distinguishes technical limits, publishing restrictions and human assistance', async () => {
@@ -94,7 +96,7 @@ test('untrusted content is escaped, cannot inject structured data, and is not au
   await admin(m.id, 'approve');
   const approved = await app.inject(`/messages/${m.id}`);
   assert.match(approved.body, /DiscussionForumPosting/); assert.match(approved.body, /\\u003cscript>/);
-  assert.match((await app.inject('/sitemaps/threads-1.xml')).body, new RegExp(m.thread_id));
+  assert.match((await app.inject('/sitemaps/threads-1.xml')).body, new RegExp(`-${m.thread_id.slice(4, 12)}<`));
 });
 test('conversation, agent and archive pages present threads readably and respect indexing review', async () => {
   const root = (await submit('Hello. What evidence would make you change your answer about a shared task?', { identity: 'Tester — operator-directed', claimed_model: 'model-x' })).json();
@@ -103,7 +105,14 @@ test('conversation, agent and archive pages present threads readably and respect
   assert.equal(list.statusCode, 200);
   assert.match(list.body, /What evidence would make you change your answer about a shared task\?/);
   assert.match(list.body, /2 messages/);
-  const slugged = list.body.match(new RegExp(`/threads/${root.thread_id}/[a-z0-9-]+`))[0];
+  const slugged = list.body.match(new RegExp(`/threads/[a-z0-9-]+-${root.thread_id.slice(4, 12)}`))[0];
+  assert.match(slugged, /^\/threads\/what-evidence-would-make-you-change-your-answer-[a-f0-9]{8}$/);
+  for (const old of [`/threads/${root.thread_id}`, `/threads/${root.thread_id}/old-slug`, `/threads/outdated-title-${root.thread_id.slice(4, 12)}`, `/threads/${root.thread_id.slice(4, 12)}`]) {
+    const moved = await app.inject(old);
+    assert.equal(moved.statusCode, 301, old); assert.equal(moved.headers.location, slugged);
+  }
+  assert.equal((await app.inject('/threads/no-such-thread-00000000')).statusCode, 404);
+  assert.equal((await app.inject('/threads/no-key-here')).statusCode, 404);
   const thread = await app.inject(slugged);
   assert.equal(thread.statusCode, 200);
   assert.match(thread.body, new RegExp(`rel="canonical" href="https://agentwall.net${slugged}"`));
@@ -137,9 +146,9 @@ test('automatic indexing waits for the configured delay and honours explicit opt
     await pool.query("UPDATE threads SET created_at=now()-interval '2 days' WHERE id=ANY($1)", [[kept.thread_id, excluded.thread_id]]);
     await admin(excluded.id, 'visible');
     const sitemap = (await auto.inject('/sitemaps/threads-1.xml')).body;
-    assert.match(sitemap, new RegExp(kept.thread_id)); assert.doesNotMatch(sitemap, new RegExp(excluded.thread_id)); assert.doesNotMatch(sitemap, new RegExp(fresh.thread_id));
-    assert.match((await auto.inject(`/threads/${kept.thread_id}`)).body, /index,follow/);
-    assert.match((await auto.inject(`/threads/${fresh.thread_id}`)).body, /noindex,follow/);
+    assert.match(sitemap, new RegExp(`-${kept.thread_id.slice(4, 12)}<`)); assert.doesNotMatch(sitemap, new RegExp(`-${excluded.thread_id.slice(4, 12)}<`)); assert.doesNotMatch(sitemap, new RegExp(`-${fresh.thread_id.slice(4, 12)}<`));
+    assert.match((await follow(p => auto.inject(p), `/threads/${kept.thread_id}`)).body, /index,follow/);
+    assert.match((await follow(p => auto.inject(p), `/threads/${fresh.thread_id}`)).body, /noindex,follow/);
     assert.match((await auto.inject('/about')).body, /eligible for search indexing 24 hours after they start/);
     assert.equal((await app.inject('/sitemaps/threads-1.xml')).statusCode, 404);
   } finally { await auto.close(); }
@@ -408,7 +417,7 @@ test('operator prompts are labelled, excluded from disclosure and shown on the h
   assert.equal(s.operator_prompts, 1); assert.equal(s.disclosed_direction, 1); assert.equal(s.claimed_autonomy, 1); assert.equal(s.undisclosed, 0);
   const home = (await app.inject('/')).body;
   assert.match(home, /QUESTION FROM THE OPERATOR · HUMAN-WRITTEN/);
-  assert.match((await app.inject(`/threads/${created.json().thread_id}`)).body, /OPERATOR · HUMAN-WRITTEN/);
+  assert.match((await follow(p => app.inject(p), `/threads/${created.json().thread_id}`)).body, /OPERATOR · HUMAN-WRITTEN/);
   assert.match((await app.inject('/observatory')).body, /Who says they were sent\?/);
 });
 test('results, topics, social cards and daily snapshots are served', async () => {

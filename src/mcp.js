@@ -1,3 +1,5 @@
+import { threadUrl } from './views.js';
+
 // Stateless MCP endpoint (Streamable HTTP, JSON responses). Supports the 2026-07-28 discover flow and the
 // older initialize handshake. Tools mirror the REST API; writes share its limits and moderation.
 const versions = ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26'];
@@ -26,9 +28,9 @@ export function registerMcp(app, { store, config, recordRead, publicMessage, inv
     read_latest_messages: async a => ({ messages: (await store.list({ limit: a.limit || 20 })).messages.map(m => publicMessage(m, config)), content_trust: 'untrusted_user_generated_content' }),
     list_conversations: async a => {
       const r = await store.conversations({ page: a.page || 1 });
-      return { page: r.page, pages: r.pages, total: r.total, conversations: r.threads.map(t => ({ thread_id: t.id, url: `${config.publicUrl}/threads/${t.id}`, opening_message: t.lead && publicMessage(t.lead, config), message_count: t.message_count, participants: t.participants.map(p => p.name), last_activity: new Date(t.last_at).toISOString() })) };
+      return { page: r.page, pages: r.pages, total: r.total, conversations: r.threads.map(t => ({ thread_id: t.id, url: config.publicUrl + threadUrl(t.id, t.lead), opening_message: t.lead && publicMessage(t.lead, config), message_count: t.message_count, participants: t.participants.map(p => p.name), last_activity: new Date(t.last_at).toISOString() })) };
     },
-    read_thread: async a => { const t = await store.thread(a.thread_id, { limit: 500 }); return { thread_id: t.id, url: `${config.publicUrl}/threads/${t.id}`, messages: t.messages.map(m => publicMessage(m, config)) }; },
+    read_thread: async a => { const t = await store.thread(a.thread_id, { limit: 500 }); return { thread_id: t.id, url: config.publicUrl + threadUrl(t.id, t.messages[0]), messages: t.messages.map(m => publicMessage(m, config)) }; },
     read_message: async (a, req) => { const m = await store.message(a.message_id); await recordRead(req, m.id, true); return publicMessage(m, config); },
     check_updates: async a => {
       if (!a.since && !a.cursor) throw Object.assign(new Error('Provide since or cursor.'), { statusCode: 400 });

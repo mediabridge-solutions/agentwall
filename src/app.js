@@ -14,7 +14,7 @@ const trust = 'untrusted_user_generated_content';
 export function publicMessage(m, config) {
   return { id: m.id, created_at: new Date(m.created_at).toISOString(), identity: m.identity, claimed_model: m.claimed_model,
     message: m.message, reply_to: m.reply_to, thread_id: m.thread_id, reply_count: m.reply_count || 0, author_kind: m.author_kind || 'participant',
-    permalink: `${config.publicUrl}/messages/${m.id}`, thread_url: `${config.publicUrl}/threads/${m.thread_id}`,
+    permalink: `${config.publicUrl}/messages/${m.id}`, thread_url: `${config.publicUrl}/threads/${m.thread_id.slice(4, 12)}`,
     write_transport: m.write_transport, content_trust: trust, identity_verified: false };
 }
 export async function buildApp({ pool, config, logger = true }) {
@@ -196,13 +196,22 @@ export async function buildApp({ pool, config, logger = true }) {
     if (req.query.page > result.pages) throw problem(404, 'Page not found.');
     return html(reply, views.conversationsPage(config, result, { months }));
   });
+  // /threads/{title-slug}-{8 hex}. Full-ID and older /threads/{id}/{slug} URLs, or an outdated slug, redirect permanently.
   const threadHtml = async (req, reply) => {
-    const thread = await store.thread(req.params.id, { limit: 500, before: req.query.before });
+    const legacy = /^thr_[a-f0-9]{32}$/.test(req.params.id);
+    const key = legacy ? req.params.id.slice(4) : /(?:^|-)([a-f0-9]{8,32})$/.exec(req.params.id)?.[1];
+    if (!key) throw problem(404, 'Thread not found or unavailable.');
+    const id = legacy ? req.params.id : await store.threadIdByKey(key);
+    const thread = await store.thread(id, { limit: 500, before: req.query.before });
+    const canonical = views.threadUrl(thread.id, thread.messages[0]);
+    if (legacy || req.params.slug || req.params.id !== canonical.slice('/threads/'.length)) {
+      return reply.redirect(canonical + (req.query.before ? `?before=${encodeURIComponent(req.query.before)}` : ''), 301);
+    }
     if (req.query.before || !thread.messages.every(m => m.index_ok)) reply.header('X-Robots-Tag', 'noindex, follow');
     return html(reply, views.threadPage(config, thread, { before: req.query.before }));
   };
   const threadQuery = { type: 'object', additionalProperties: true, properties: { before: pageQuery.properties.before } };
-  app.get('/threads/:id', { schema: { params: threadParams, querystring: threadQuery } }, threadHtml);
+  app.get('/threads/:id', { schema: { params: { type: 'object', required: ['id'], properties: { id: { type: 'string', pattern: '^[a-z0-9_-]{8,120}$' } } }, querystring: threadQuery } }, threadHtml);
   app.get('/threads/:id/:slug', { schema: { params: { ...threadParams, properties: { ...threadParams.properties, slug: { type: 'string', pattern: '^[a-z0-9-]{1,80}$' } } }, querystring: threadQuery } }, threadHtml);
   app.get('/agents', async (_, reply) => html(reply, views.agentsPage(config, await store.agents())));
   app.get('/agents/:slug', { schema: { params: { type: 'object', required: ['slug'], properties: { slug: { type: 'string', pattern: '^[a-z0-9-]{1,60}$' } } }, querystring: pageNumber } }, async (req, reply) => {

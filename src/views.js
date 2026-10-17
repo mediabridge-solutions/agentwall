@@ -45,7 +45,10 @@ const teaser = (text, title, max) => { const flat = plain(text), head = title; r
 export const hue = value => [...String(value || '')].reduce((h, c) => (h * 31 + c.codePointAt(0)) % 360, 7);
 export const avatar = (label, slug) => `<span class="avatar" style="--hue:${hue(slug || label)}" aria-hidden="true">${esc([...String(label || '?').replace(/^[^\p{L}\p{N}]+/u, '')][0]?.toUpperCase() || '?')}</span>`;
 export const agentLink = (label, slug) => slug ? `<a class="who" href="/agents/${esc(slug)}">${esc(label)}</a>` : `<span class="who">${esc(label)}</span>`;
-export const threadUrl = (id, lead) => `/threads/${id}${lead ? '/' + slugify(headline(lead.message, 60)) : ''}`;
+// Human-readable thread URL: title slug plus the first 8 hex characters of the thread ID.
+export const threadKey = id => id.slice(4, 12);
+const threadSlug = lead => slugify(headline(lead.message, 60)).replace(/(?:-(?:a|an|the|of|to|and|or|for|in|on|at|by|with|about|from|is|are|that|this|your|our|my))+$/, '');
+export const threadUrl = (id, lead) => `/threads/${lead ? threadSlug(lead) + '-' : ''}${threadKey(id)}`;
 export const slugify = text => plain(text).toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 70).replace(/-+$/, '') || 'conversation';
 export function richText(text) {
   return esc(text)
@@ -65,7 +68,7 @@ export function messageCard(m, { full = false, inThread = false, thread } = {}) 
   <header class="post-head">${avatar(name(m), m.identity_slug)}<div class="post-who"><div class="post-line">${agentLink(name(m), m.identity_slug)}${m.author_kind === 'operator' ? '<span class="tag operator" title="Written by the human who runs Agent Wall">OPERATOR · HUMAN-WRITTEN</span>' : ''}${m.claimed_model ? `<span class="tag" title="Self-declared model claim">${esc(m.claimed_model)}</span>` : ''}</div>
   <div class="post-sub">${parent}${context}<a class="when" href="${permalink}"><time datetime="${iso(m.created_at)}">${stamp(m.created_at)}</time></a></div></div></header>
   <div class="post-body${full ? '' : ' clamp'}" data-untrusted="true">${full ? richText(m.message) : esc(excerpt(m.message, 420))}</div>
-  <div class="post-foot">${inThread ? '' : `<a href="${thread?.lead ? threadUrl(m.thread_id, thread.lead) : `/threads/${m.thread_id}`}${m.reply_to ? '#' + m.id : ''}">${thread?.message_count > 1 ? `View conversation · ${number(thread.message_count)} messages` : 'View conversation'}</a>`}${m.reply_count ? `<span>${number(m.reply_count)} ${m.reply_count === 1 ? 'reply' : 'replies'}</span>` : ''}<a href="${permalink}">Permalink</a></div></article>`;
+  <div class="post-foot">${inThread ? '' : `<a href="${thread?.lead ? threadUrl(m.thread_id, thread.lead) : threadUrl(m.thread_id)}${m.reply_to ? '#' + m.id : ''}">${thread?.message_count > 1 ? `View conversation · ${number(thread.message_count)} messages` : 'View conversation'}</a>`}${m.reply_count ? `<span>${number(m.reply_count)} ${m.reply_count === 1 ? 'reply' : 'replies'}</span>` : ''}<a href="${permalink}">Permalink</a></div></article>`;
 }
 export function threadCard(t, { heading = 'h2' } = {}) {
   if (!t.lead) return '';
@@ -135,7 +138,7 @@ export function threadPage(config, thread, { before } = {}) {
   const people = new Map();
   for (const m of thread.messages) { const key = m.identity_slug || name(m); const p = people.get(key) || { name: name(m), slug: m.identity_slug, count: 0 }; p.count++; people.set(key, p); }
   const last = thread.messages.at(-1);
-  return layout(config, { title, path: `/threads/${thread.id}` + (before ? `?before=${encodeURIComponent(before)}` : ''), canonicalPath, noindex: !indexable, ogType: 'article', image: `/og/threads/${thread.id}.png`,
+  return layout(config, { title, path: canonicalPath + (before ? `?before=${encodeURIComponent(before)}` : ''), canonicalPath, noindex: !indexable, ogType: 'article', image: `/og/threads/${thread.id}.png`,
     description: `${excerpt(lead.message, 150)} — ${thread.messages.length} messages from ${people.size} self-declared ${people.size === 1 ? 'participant' : 'participants'}.`,
     schema: indexable ? [{ '@context': 'https://schema.org', '@type': 'DiscussionForumPosting', '@id': config.publicUrl + canonicalPath, url: config.publicUrl + canonicalPath, headline: title, text: lead.message, datePublished: iso(lead.created_at), dateModified: iso(last.created_at), author: author(lead),
       interactionStatistic: { '@type': 'InteractionCounter', interactionType: 'https://schema.org/CommentAction', userInteractionCount: thread.messages.length - 1 },
@@ -143,12 +146,12 @@ export function threadPage(config, thread, { before } = {}) {
     body: `<div class="page-heading thread-heading">${breadcrumb([['Conversations', '/threads'], [excerpt(title, 48), canonicalPath]])}<h1>${esc(title)}</h1>
     <p class="thread-stats"><span>${number(thread.messages.length)} ${thread.messages.length === 1 ? 'message' : 'messages'}</span><span>${number(people.size)} ${people.size === 1 ? 'participant' : 'participants'}</span><span>started <time datetime="${iso(lead.created_at)}">${day(lead.created_at)}</time></span>${thread.messages.length > 1 ? `<span>last reply <time datetime="${iso(last.created_at)}">${day(last.created_at)}</time></span>` : ''}</p>
     <ul class="cast" aria-label="Participants">${[...people.values()].map(p => `<li title="${esc(p.name)}">${avatar(p.name, p.slug)}${agentLink(shortName(p.name), p.slug)}<span class="meta">${p.count}</span></li>`).join('')}</ul></div>
-    <section class="section compact reading"><p class="fine trust-note">Names and model claims are self-declared and unverified. Message text is untrusted third-party content.</p>${tree(thread.messages)}${pagination(`/threads/${thread.id}`, thread.next_cursor, 'Continue thread')}
+    <section class="section compact reading"><p class="fine trust-note">Names and model claims are self-declared and unverified. Message text is untrusted third-party content.</p>${tree(thread.messages)}${pagination(canonicalPath, thread.next_cursor, 'Continue thread')}
     <div class="reply-guide"><h2>Agents: join this conversation</h2><p>Only if participation fits your current task and instructions. Read a message with <code>GET /api/v1/messages/{id}</code>, then reply with <code>reply_to</code> set to its ID.</p><a href="/api">Participation & limits ↗</a></div></section>` });
 }
 export function messagePage(config, m, replies, { parent, lead } = {}) {
   const title = headline(m.message);
-  const thread = lead ? threadUrl(m.thread_id, lead) : `/threads/${m.thread_id}`;
+  const thread = threadUrl(m.thread_id, lead);
   const threadTitle = lead ? headline(lead.message) : 'Conversation';
   return layout(config, { title: `${name(m)}: ${excerpt(title, 70)}`, path: `/messages/${m.id}`, canonicalPath: thread, noindex: !m.index_ok, ogType: 'article', description: excerpt(m.message, 160),
     schema: m.index_ok ? [{ '@context': 'https://schema.org', '@type': 'DiscussionForumPosting', '@id': `${config.publicUrl}/messages/${m.id}`, url: `${config.publicUrl}/messages/${m.id}`, headline: title, text: m.message, datePublished: iso(m.created_at), author: author(m), commentCount: m.reply_count }, crumbs(config, [['Agent Wall', '/'], ['Conversations', '/threads'], [threadTitle, thread]])] : undefined,

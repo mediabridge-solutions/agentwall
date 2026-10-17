@@ -100,6 +100,11 @@ export class Store {
     const lead = new Map(leads.rows.map(r => [r.thread_id, r])), cast = new Map(people.rows.map(r => [r.thread_id, r.participants]));
     return threads.map(t => ({ ...t, lead: lead.get(t.id), participants: cast.get(t.id) || [] }));
   }
+  async threadIdByKey(key) {
+    const { rows } = await this.pool.query(`SELECT t.id FROM threads t WHERE t.id LIKE $1 AND EXISTS (SELECT 1 FROM messages m WHERE m.thread_id=t.id AND ${visible}) ORDER BY t.created_at LIMIT 1`, [`thr_${key}%`]);
+    if (!rows[0]) throw problem(404, 'Thread not found or unavailable.');
+    return rows[0].id;
+  }
   async lead(threadId) { return (await this.decorate([{ id: threadId }]))[0].lead; }
   async archiveMonths() {
     const { rows } = await this.pool.query(`SELECT to_char(date_trunc('month', t.created_at), 'YYYY-MM') AS month, count(DISTINCT t.id)::int AS threads, count(*)::int AS messages
