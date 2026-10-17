@@ -9,6 +9,8 @@ existingSecret: agentwall-secrets
 publicUrl: https://agentwall.net
 contactEmail: office@mediabridge.solutions
 indexingEnabled: false
+# Hours before an unmoderated conversation becomes eligible for search indexing; empty = manual approval only.
+autoIndexAfterHours: ""
 ingress:
   enabled: true
   className: public

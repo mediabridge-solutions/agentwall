@@ -1,0 +1,110 @@
+/* Reading surfaces: conversations, threads, messages and agents. */
+.reading { max-width: 980px; }
+.crumbs { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; font: 14px var(--mono); color: var(--muted); margin-bottom: 22px; }
+.crumbs a { color: var(--muted); text-decoration: none; }
+.crumbs a:hover { color: var(--accent); }
+.crumbs [aria-current] { color: var(--ink); overflow-wrap: anywhere; }
+.toolbar-links { display: flex; gap: 22px; flex-wrap: wrap; }
+
+/* Avatars: a hue derived from the self-declared name, so speakers are easy to follow. */
+.avatar { --hue: 100; flex: none; display: inline-grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; font: 600 16px var(--mono); color: hsl(var(--hue) 60% 88%); background: hsl(var(--hue) 32% 24%); border: 1px solid hsl(var(--hue) 40% 40%); }
+.who { font: 600 17px var(--mono); text-decoration: none; color: var(--ink); overflow-wrap: anywhere; }
+a.who:hover { color: var(--accent); }
+.tag { display: inline-block; font: 13px var(--mono); color: var(--muted); border: 1px solid var(--line); border-radius: 3px; padding: 1px 8px; line-height: 1.6; overflow-wrap: anywhere; }
+.tags { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0 0; }
+
+/* Posts */
+.post { padding: 22px 0 18px; border-bottom: 1px solid var(--line); scroll-margin-top: 24px; }
+.post:target { background: linear-gradient(90deg, #223019, transparent 85%); box-shadow: -14px 0 0 #223019; }
+.post-head { display: flex; gap: 14px; align-items: flex-start; }
+.post-who { min-width: 0; flex: 1; }
+.post-line { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; }
+.post-sub { display: flex; flex-wrap: wrap; gap: 4px 16px; font: 14px var(--mono); color: var(--muted); margin-top: 2px; }
+.post-sub a { color: var(--muted); text-decoration: none; border-bottom: 1px dotted var(--line); }
+.post-sub a:hover { color: var(--accent); }
+.reply-to a { color: #cfd8c9; }
+.post-body { font-size: 18px; line-height: 1.72; white-space: pre-wrap; overflow-wrap: anywhere; margin: 14px 0 14px 52px; max-width: 72ch; color: #e3e7dc; }
+.post-body.clamp { display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
+.post-body a.ext { color: var(--accent); text-decoration: underline; text-decoration-color: #5d7a48; }
+.post-body code { background: #1d251a; border: 1px solid var(--line); padding: 0 5px; font-size: 15px; }
+.post-foot { display: flex; flex-wrap: wrap; gap: 6px 22px; margin-left: 52px; font: 14px var(--mono); color: var(--muted); }
+.post-foot a { text-decoration: none; color: var(--muted); }
+.post-foot a:hover { color: var(--accent); }
+.post-foot a:first-child { color: var(--ink); }
+
+/* Thread tree */
+.thread-heading h1 { font-size: clamp(30px, 3.6vw, 52px); letter-spacing: -1.5px; line-height: 1.15; max-width: 30ch; margin: 10px 0 18px; overflow-wrap: anywhere; }
+.thread-stats { display: flex; flex-wrap: wrap; gap: 6px 22px; font: 15px var(--mono); color: var(--muted); margin: 0 0 18px; }
+.thread-stats .who { font-size: 15px; }
+.cast { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 10px; }
+.cast li { display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 30px; padding: 4px 14px 4px 4px; }
+.cast .avatar { width: 30px; height: 30px; font-size: 13px; }
+.cast .who { font-size: 14px; }
+.trust-note { margin: 0 0 6px; }
+.tree { list-style: none; margin: 0; padding: 0; }
+.tree .tree { margin-left: 18px; padding-left: 20px; border-left: 2px solid #2b3529; }
+.tree .tree:hover { border-left-color: #48593f; }
+.tree .tree.flat { margin-left: 0; padding-left: 0; border-left: 0; }
+.parent-context { border-left: 3px solid var(--line); padding: 10px 16px; margin: 6px 0 4px; }
+.parent-context a { display: block; text-decoration: none; color: var(--muted); font-size: 16px; margin-top: 4px; }
+.parent-context a:hover { color: var(--ink); }
+.thread-jump { margin: 24px 0 40px; }
+
+/* Conversation lists */
+.thread-list { border-top: 1px solid var(--line); }
+.thread-card { padding: 24px 0; border-bottom: 1px solid var(--line); }
+.thread-card h2, .thread-card h3 { font-size: 22px; line-height: 1.35; letter-spacing: -.3px; margin: 0 0 8px; font-weight: 500; }
+.thread-card h2 a, .thread-card h3 a { text-decoration: none; }
+.thread-excerpt { color: #b9c4b2; font-size: 16px; line-height: 1.7; margin: 0 0 14px; max-width: 80ch; overflow-wrap: anywhere; }
+.thread-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; font: 14px var(--mono); color: var(--muted); }
+.stack { display: inline-flex; }
+.stack .avatar { width: 26px; height: 26px; font-size: 11px; margin-right: -7px; border-color: var(--bg); border-width: 2px; }
+.stack + .names { margin-left: 8px; overflow-wrap: anywhere; }
+.thread-meta .names { max-width: 46ch; }
+.dot-sep::before { content: '·'; margin-right: 14px; }
+.more-links { display: flex; flex-wrap: wrap; gap: 14px 30px; margin-top: 28px; }
+.pager { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin: 32px 0 8px; }
+.month-links { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: baseline; margin-top: 36px; padding-top: 18px; border-top: 1px solid var(--line); font: 15px var(--mono); }
+.month-links a { color: var(--muted); }
+.month-links a[aria-current] { color: var(--accent); }
+.archive-list { list-style: none; padding: 0; margin: 0; border-top: 1px solid var(--line); }
+.archive-list li { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; padding: 18px 0; border-bottom: 1px solid var(--line); font-size: 20px; }
+.archive-list a { text-decoration: none; }
+
+/* Agents */
+.agent-grid { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0 32px; border-top: 1px solid var(--line); }
+.agent-grid li { display: flex; gap: 14px; padding: 18px 0; border-bottom: 1px solid var(--line); min-width: 0; }
+.agent-grid li > div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.agent-grid .meta { font-size: 14px; }
+.agent-title { display: flex; align-items: center; gap: 18px; }
+.agent-title .avatar { width: 56px; height: 56px; font-size: 24px; }
+.agent-title h1 { margin: 10px 0; }
+
+@media (max-width: 760px) {
+  .avatar { width: 32px; height: 32px; font-size: 14px; }
+  .post-body { margin-left: 0; font-size: 17px; }
+  .post-foot { margin-left: 0; }
+  .post-sub, .post-foot, .thread-meta, .thread-stats { font-size: 13px; }
+  .tree .tree { margin-left: 4px; padding-left: 10px; }
+  .tree .tree .tree .tree { margin-left: 0; padding-left: 6px; }
+  .thread-card h2, .thread-card h3 { font-size: 19px; }
+  .pager { flex-wrap: wrap; }
+  .agent-title .avatar { width: 44px; height: 44px; font-size: 19px; }
+}
+
+/* Operator prompts, results and home highlights */
+.tag.operator { color: #f2d88f; border-color: #6b5a2a; }
+.operator-post .avatar { background: #3a3218; border-color: #6b5a2a; color: #f2d88f; }
+.latest-note, .operator-prompt { padding-top: 36px; padding-bottom: 36px; }
+.latest-note h2, .operator-prompt h2 { margin: 10px 0 8px; max-width: 40ch; }
+.latest-note h2 a, .operator-prompt h2 a { text-decoration: none; }
+.latest-note p { color: #c1cbbb; max-width: 72ch; }
+.operator-prompt { background: #1a1a12; }
+.note-body { max-width: 760px; }
+.note-body h2 { font-size: 28px; margin-top: 48px; }
+.note-body h3 { font-size: 21px; margin-top: 32px; font-weight: 600; }
+.note-body blockquote { margin: 24px 0; padding: 4px 0 4px 20px; border-left: 3px solid var(--accent); }
+.note-body blockquote p { color: var(--ink); font-style: italic; }
+.note-body hr { border: 0; border-top: 1px solid var(--line); margin: 40px 0; }
+.note-body code { background: #1d251a; padding: 0 5px; font-size: 15px; }
+.note-pager { border-bottom: 0; }

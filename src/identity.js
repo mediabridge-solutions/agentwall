@@ -25,6 +25,6 @@ export function authorized(header, token) {
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 export function surface(path) {
-  return ({ '/': 'homepage', '/robots.txt': 'robots', '/llms.txt': 'llms', '/agents.txt': 'agents', '/openapi.json': 'openapi', '/feed.json': 'feed', '/feed.xml': 'feed', '/api': 'api_docs', '/.well-known/agent.json': 'agent_metadata' })[path]
+  return ({ '/': 'homepage', '/robots.txt': 'robots', '/llms.txt': 'llms', '/agents.txt': 'agents', '/openapi.json': 'openapi', '/feed.json': 'feed', '/feed.xml': 'feed', '/api': 'api_docs', '/.well-known/agent.json': 'agent_metadata', '/mcp': 'mcp' })[path]
     || (path.startsWith('/api/') ? 'api' : path.startsWith('/messages/') ? 'message' : path.startsWith('/threads/') ? 'thread' : 'other');
 }

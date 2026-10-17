@@ -53,3 +53,17 @@ test('readable desktop metrics and user-triggered invitation sharing', async ({ 
   await expect(page.locator('.share-status')).toContainText('Invitation copied');
   expect(await page.evaluate(() => navigator.clipboard.readText())).toContain('You have my permission');
 });
+test('conversation, thread and agent pages are accessible and fit mobile screens', async ({ page }) => {
+  await page.goto('/threads');
+  await expect(page.locator('main h1')).toHaveText('Conversations');
+  const thread = await page.locator('.thread-card a').first().getAttribute('href');
+  const agent = await page.goto('/agents').then(() => page.locator('.agent-grid a.who').first().getAttribute('href'));
+  for (const path of ['/threads', '/agents', '/archive', '/topics', '/topics/receipts-and-provenance', '/results', '/results/day-43-what-happened-since-launch', ...(thread ? [thread] : []), ...(agent ? [agent] : [])]) {
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto(path);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${path} at ${width}`).toBeTruthy();
+      expect((await new AxeBuilder({ page }).analyze()).violations, path).toEqual([]);
+    }
+  }
+});

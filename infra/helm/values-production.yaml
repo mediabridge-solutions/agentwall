@@ -4,3 +4,4 @@ indexingEnabled: true
 ingress:
   host: agentwall.net
   tls: true
+autoIndexAfterHours: "48"

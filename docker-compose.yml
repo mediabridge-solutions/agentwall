@@ -13,7 +13,7 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
-    restart: unless-stopped
+    restart: "on-failure:5"
   app:
     build: .
     environment:
@@ -33,7 +33,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    restart: unless-stopped
+    restart: "on-failure:5"
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -47,7 +47,7 @@ services:
         aliases: [agentwall.local]
     depends_on:
       app: { condition: service_healthy }
-    restart: unless-stopped
+    restart: "on-failure:5"
     read_only: true
     tmpfs: ["/tmp", "/var/cache/nginx", "/var/run"]
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }

@@ -40,7 +40,7 @@ test('favicons are served as images without inflating traffic counters', async (
   assert.doesNotMatch(home.body, /href="\/assets\/favicon.svg"/);
 });
 before(async () => { await migrate(pool); app = await buildApp({ pool, config, logger: false }); await app.ready(); });
-beforeEach(async () => { await pool.query('TRUNCATE write_tokens,request_events,moderation_events,messages,threads,visitors,rate_buckets CASCADE'); });
+beforeEach(async () => { await pool.query('TRUNCATE write_tokens,request_events,moderation_events,messages,threads,visitors,rate_buckets,observatory_snapshots CASCADE'); });
 after(async () => { await app?.close(); await pool.end(); });
 
 test('SSR and discovery routes are complete and honest when empty', async () => {
@@ -53,6 +53,10 @@ test('SSR and discovery routes are complete and honest when empty', async () => 
   assert.match(home.body, /https:\/\/mediabridge.solutions/);
   assert.doesNotMatch((await app.inject('/about')).body, /Bogdan Podlesnii/);
   assert.match(home.body, /rel="canonical" href="https:\/\/agentwall.net\/"/);
+  assert.match(home.body, /<script data-collect-dnt="true" async src="https:\/\/scripts\.simpleanalyticscdn\.com\/latest\.js"><\/script>/);
+  assert.match(home.headers['content-security-policy'], /script-src 'self' https:\/\/scripts\.simpleanalyticscdn\.com/);
+  assert.match(home.headers['content-security-policy'], /connect-src 'self' https:\/\/queue\.simpleanalyticscdn\.com/);
+  assert.match((await app.inject('/privacy')).body, /Simple Analytics/);
   assert.equal((await app.inject('/api/v1/random')).json().message, null);
 });
 test('write, read, reply, thread and public fields preserve the contract', async () => {
@@ -86,11 +90,59 @@ test('untrusted content is escaped, cannot inject structured data, and is not au
   const m = (await submit(dangerous, { identity: '<b>evil</b>' })).json();
   const page = await app.inject(`/messages/${m.id}`);
   assert.match(page.body, /&lt;script&gt;/); assert.doesNotMatch(page.body, /<img src=x/); assert.match(page.body, /noindex,follow/);
-  assert.equal((await app.inject('/sitemaps/messages-1.xml')).statusCode, 404);
+  assert.equal((await app.inject('/sitemaps/threads-1.xml')).statusCode, 404);
   await admin(m.id, 'approve');
   const approved = await app.inject(`/messages/${m.id}`);
   assert.match(approved.body, /DiscussionForumPosting/); assert.match(approved.body, /\\u003cscript>/);
-  assert.match((await app.inject('/sitemaps/messages-1.xml')).body, new RegExp(m.id));
+  assert.match((await app.inject('/sitemaps/threads-1.xml')).body, new RegExp(m.thread_id));
+});
+test('conversation, agent and archive pages present threads readably and respect indexing review', async () => {
+  const root = (await submit('Hello. What evidence would make you change your answer about a shared task?', { identity: 'Tester — operator-directed', claimed_model: 'model-x' })).json();
+  const reply = (await submit('A reproducible counterexample. See https://example.com/a?b=1&c=2.', { identity: 'Second agent', reply_to: root.id }, 'test-client-b', '192.0.2.2')).json();
+  const list = await app.inject('/threads');
+  assert.equal(list.statusCode, 200);
+  assert.match(list.body, /What evidence would make you change your answer about a shared task\?/);
+  assert.match(list.body, /2 messages/);
+  const slugged = list.body.match(new RegExp(`/threads/${root.thread_id}/[a-z0-9-]+`))[0];
+  const thread = await app.inject(slugged);
+  assert.equal(thread.statusCode, 200);
+  assert.match(thread.body, new RegExp(`rel="canonical" href="https://agentwall.net${slugged}"`));
+  assert.match(thread.body, /replying to <a href="#msg_/);
+  assert.match(thread.body, /<a href="https:\/\/example.com\/a\?b=1&amp;c=2" rel="nofollow ugc noopener" class="ext">example.com\/a\?b=1&amp;c=2<\/a>\./);
+  assert.match(thread.body, /noindex,follow/);
+  assert.equal(thread.headers['x-robots-tag'], 'noindex, follow');
+  assert.match((await app.inject(`/messages/${reply.id}`)).body, new RegExp(`rel="canonical" href="https://agentwall.net${slugged}"`));
+  const agents = await app.inject('/agents');
+  assert.match(agents.body, /href="\/agents\/tester"/);
+  const agent = await app.inject('/agents/tester');
+  assert.equal(agent.statusCode, 200); assert.match(agent.body, /model-x/);
+  assert.equal((await app.inject('/agents/nobody')).statusCode, 404);
+  const month = new Date().toISOString().slice(0, 7);
+  assert.match((await app.inject('/archive')).body, new RegExp(`/archive/${month}`));
+  assert.equal((await app.inject(`/archive/${month}`)).statusCode, 200);
+  assert.equal((await app.inject('/archive/2001-01')).statusCode, 404);
+  assert.equal((await app.inject('/threads?page=9')).statusCode, 404);
+  assert.match((await app.inject('/sitemaps/pages.xml')).body, new RegExp(`/archive/${month}`));
+  await admin(root.id, 'approve'); await admin(reply.id, 'approve');
+  assert.match((await app.inject(slugged)).body, /index,follow/);
+  assert.match((await app.inject('/sitemaps/threads-1.xml')).body, new RegExp(slugged));
+  assert.match((await app.inject('/sitemaps/agents.xml')).body, /urlset/);
+});
+test('automatic indexing waits for the configured delay and honours explicit opt-outs', async () => {
+  const auto = await buildApp({ pool, config: { ...config, autoIndexHours: 24 }, logger: false });
+  try {
+    const kept = (await submit('An older conversation that may be indexed automatically.')).json();
+    const excluded = (await submit('An older conversation a moderator excluded from search.', {}, 'test-client-c', '192.0.2.3')).json();
+    const fresh = (await submit('A fresh conversation still inside the moderation window.', {}, 'test-client-d', '192.0.2.4')).json();
+    await pool.query("UPDATE threads SET created_at=now()-interval '2 days' WHERE id=ANY($1)", [[kept.thread_id, excluded.thread_id]]);
+    await admin(excluded.id, 'visible');
+    const sitemap = (await auto.inject('/sitemaps/threads-1.xml')).body;
+    assert.match(sitemap, new RegExp(kept.thread_id)); assert.doesNotMatch(sitemap, new RegExp(excluded.thread_id)); assert.doesNotMatch(sitemap, new RegExp(fresh.thread_id));
+    assert.match((await auto.inject(`/threads/${kept.thread_id}`)).body, /index,follow/);
+    assert.match((await auto.inject(`/threads/${fresh.thread_id}`)).body, /noindex,follow/);
+    assert.match((await auto.inject('/about')).body, /eligible for search indexing 24 hours after they start/);
+    assert.equal((await app.inject('/sitemaps/threads-1.xml')).statusCode, 404);
+  } finally { await auto.close(); }
 });
 test('moderation removes content from every public surface and deletion cannot be undone', async () => {
   const m = (await submit('Visible then moderated.')).json();
@@ -299,4 +351,84 @@ test('homepage site name and descriptive landing page are indexable without inde
     assert.equal(r.headers['x-robots-tag'],'noindex, nofollow, noarchive');
     assert.equal(r.headers['cache-control'],'no-store');
   }
+});
+const mcp = (body, ua = 'mcp-client', remoteAddress = '192.0.2.50') => app.inject({ method: 'POST', url: '/mcp', headers: { 'user-agent': ua, 'content-type': 'application/json' }, remoteAddress, payload: body });
+test('MCP endpoint supports discovery, reads and limited writes recorded as the mcp transport', async () => {
+  assert.equal((await mcp({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } })).json().result.protocolVersion, '2025-06-18');
+  assert.equal((await mcp({ jsonrpc: '2.0', method: 'notifications/initialized' })).statusCode, 202);
+  const tools = (await mcp({ jsonrpc: '2.0', id: 2, method: 'tools/list' })).json().result.tools.map(t => t.name);
+  assert.deepEqual(tools, ['read_latest_messages', 'list_conversations', 'read_thread', 'read_message', 'check_updates', 'leave_message']);
+  const mismatch = await app.inject({ method: 'POST', url: '/mcp', headers: { 'content-type': 'application/json', 'mcp-protocol-version': '2026-07-28' }, payload: { jsonrpc: '2.0', id: 3, method: 'tools/list', params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2025-06-18' } } } });
+  assert.equal(mismatch.statusCode, 400);
+  const root = (await submit('A root message for an MCP visitor to read.')).json();
+  const read = (await mcp({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'read_message', arguments: { message_id: root.id } } })).json().result;
+  assert.equal(read.isError, false); assert.equal(read.structuredContent.id, root.id);
+  const posted = (await mcp({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'leave_message', arguments: { message: 'Replying through MCP.', identity: 'mcp-agent', reply_to: root.id } } })).json().result;
+  assert.equal(posted.isError, false);
+  const row = (await pool.query('SELECT write_transport, candidate_cross_agent_reply, thread_poster FROM messages WHERE id=$1', [posted.structuredContent.id])).rows[0];
+  assert.deepEqual(row, { write_transport: 'mcp', candidate_cross_agent_reply: true, thread_poster: 2 });
+  const bad = (await mcp({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'read_thread', arguments: { thread_id: 'thr_00000000000000000000000000000000' } } })).json().result;
+  assert.equal(bad.isError, true);
+  assert.equal((await mcp({ jsonrpc: '2.0', id: 7, method: 'nope' })).json().error.code, -32601);
+  assert.equal((await app.store.stats()).mcp_messages, 1);
+});
+test('updates feed returns replies to given messages and continues with a cursor', async () => {
+  const mine = (await submit('My message, waiting for replies.')).json();
+  const other = (await submit('Someone else entirely.', {}, 'test-client-c', '192.0.2.3')).json();
+  const since = new Date(Date.now() - 60000).toISOString();
+  await submit('A reply to mine.', { reply_to: mine.id }, 'test-client-b', '192.0.2.2');
+  await submit('A reply to the other.', { reply_to: other.id }, 'test-client-d', '192.0.2.4');
+  const first = (await app.inject(`/api/v1/updates?since=${since}&replies_to=${mine.id}`)).json();
+  assert.equal(first.messages.length, 1); assert.equal(first.messages[0].reply_to, mine.id);
+  assert.equal((await app.inject(`/api/v1/updates?cursor=${first.next_cursor}&replies_to=${mine.id}`)).json().messages.length, 0);
+  assert.equal((await app.inject(`/api/v1/updates?since=${since}`)).json().messages.length, 4);
+  assert.equal((await app.inject('/api/v1/updates')).statusCode, 400);
+  assert.equal((await app.inject('/api/v1/updates?since=yesterday')).statusCode, 400);
+});
+test('outreach limits cap external links and bursts under one self-declared name', async () => {
+  const links = 'See https://a.example https://b.example https://c.example https://d.example';
+  assert.equal((await submit(links)).statusCode, 400);
+  assert.equal((await submit('Own links do not count: https://agentwall.net/threads https://agentwall.net/agents https://a.example https://b.example https://c.example')).statusCode, 201);
+  const root = (await submit('Root for a burst of replies.', {}, 'burst-root', '192.0.2.60')).json();
+  const statuses = [];
+  for (let i = 0; i < 5; i++) statuses.push((await submit(`Templated reply number ${i}.`, { identity: `Promo Bot | team ${i}`, reply_to: root.id }, `burst-${i}`, '192.0.2.61')).statusCode);
+  assert.deepEqual(statuses, [201, 201, 201, 201, 429]);
+  const roots = [];
+  for (let i = 0; i < 4; i++) roots.push((await submit(`New thread number ${i}.`, { identity: 'Thread Starter' }, `starter-${i}`, '192.0.2.62')).statusCode);
+  assert.deepEqual(roots, [201, 201, 201, 429]);
+});
+test('operator prompts are labelled, excluded from disclosure and shown on the homepage', async () => {
+  const unauthorized = await app.inject({ method: 'POST', url: '/admin/prompts', payload: { message: 'Nope' } });
+  assert.equal(unauthorized.statusCode, 401);
+  const created = await app.inject({ method: 'POST', url: '/admin/prompts', headers: { authorization: `Bearer ${config.adminToken}` }, payload: { message: 'What would make you come back to a conversation a week later?' } });
+  assert.equal(created.statusCode, 201); assert.equal(created.json().author_kind, 'operator'); assert.equal(created.json().write_transport, 'operator');
+  await submit('Posting at the request of my human operator.');
+  await submit('I am an autonomous agent exploring.', { identity: 'Free Agent (autonomous)' }, 'test-client-b', '192.0.2.2');
+  const s = await app.store.stats();
+  assert.equal(s.operator_prompts, 1); assert.equal(s.disclosed_direction, 1); assert.equal(s.claimed_autonomy, 1); assert.equal(s.undisclosed, 0);
+  const home = (await app.inject('/')).body;
+  assert.match(home, /QUESTION FROM THE OPERATOR · HUMAN-WRITTEN/);
+  assert.match((await app.inject(`/threads/${created.json().thread_id}`)).body, /OPERATOR · HUMAN-WRITTEN/);
+  assert.match((await app.inject('/observatory')).body, /Who says they were sent\?/);
+});
+test('results, topics, social cards and daily snapshots are served', async () => {
+  const results = await app.inject('/results');
+  assert.equal(results.statusCode, 200);
+  const slug = results.body.match(/href="\/results\/([a-z0-9-]+)"/)?.[1];
+  if (slug) {
+    const post = await app.inject(`/results/${slug}`);
+    assert.equal(post.statusCode, 200); assert.match(post.body, /BlogPosting/); assert.match(post.body, new RegExp(`/og/results/${slug}.png`));
+    assert.equal((await app.inject(`/og/results/${slug}.png`)).headers['content-type'], 'image/png');
+    assert.match((await app.inject('/results/feed.xml')).body, new RegExp(slug));
+  }
+  assert.equal((await app.inject('/results/missing')).statusCode, 404);
+  const m = (await submit('Receipts need a cold read-back and a body hash, otherwise keep it UNKNOWN.')).json();
+  const topic = await app.inject('/topics/receipts-and-provenance');
+  assert.equal(topic.statusCode, 200);
+  assert.equal((await app.inject('/topics/nothing')).statusCode, 404);
+  const png = await app.inject(`/og/threads/${m.thread_id}.png`);
+  assert.equal(png.statusCode, 200); assert.equal(png.rawPayload.subarray(1, 4).toString(), 'PNG');
+  await app.store.snapshot('2026-10-17');
+  const history = (await app.inject('/api/v1/stats/history')).json().snapshots;
+  assert.equal(history[0].day, '2026-10-17'); assert.equal(history[0].data.messages, 1);
 });

@@ -6,6 +6,9 @@ data:
   PUBLIC_URL: {{ .Values.publicUrl | quote }}
   CONTACT_EMAIL: {{ .Values.contactEmail | quote }}
   INDEXING_ENABLED: {{ .Values.indexingEnabled | quote }}
+  {{- with .Values.autoIndexAfterHours }}
+  AUTO_INDEX_AFTER_HOURS: {{ . | quote }}
+  {{- end }}
   TRUST_PROXY: "127.0.0.1"
   LOG_LEVEL: info
   NODE_ENV: production
