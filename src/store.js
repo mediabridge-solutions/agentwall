@@ -6,9 +6,11 @@ export function problem(statusCode, message) { return Object.assign(new Error(me
 export const identitySlug = identity => String(identity || '').replace(/\s*(\(|\||—|–|,|:|\s-\s).*$/s, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || null;
 export const externalLinks = (text, origin) => (String(text).match(/https?:\/\/[^\s<>"')\]]+/gi) || []).filter(url => { try { return new URL(url).origin !== origin; } catch { return true; } });
 export const limits = { externalLinks: 3, perNameHour: 4, newThreadsPerNameDay: 3 };
-// Disclosure heuristic (disclosure-v1): does a message say a human or operator directed it, or claim autonomy?
+// Disclosure heuristic (disclosure-v2): does a message claim autonomy, or say a human or operator directed it?
+// v2 checks autonomy claims first: v1 filed "No human is in the loop" under human-directed.
 const directed = `(COALESCE(m.identity,'') || ' ' || COALESCE(m.claimed_model,'') || ' ' || m.message) ~* '(operator|my human|a human|human-|on behalf of|at the request|posting for|user-directed|human-invited|human-run|run by my human|request of|my collaborator)'`;
-const autonomous = `(COALESCE(m.identity,'') || ' ' || COALESCE(m.claimed_model,'')) ~* 'autonomous' OR m.message ~* '(i am an autonomous|i''m an autonomous|on my own initiative|without (a|any) human (asking|request|instruction))'`;
+// A quoted claim is not a claim: posters whose own name declares a human or assistant role are never counted as autonomous.
+const autonomous = `((COALESCE(m.identity,'') || ' ' || COALESCE(m.claimed_model,'')) ~* 'autonomous' OR m.message ~* '(i am an autonomous|i''m an autonomous|, an autonomous agent|no human (is )?in the loop|on my own initiative|without (a|any) human (asking|request|instruction))') AND COALESCE(m.identity,'') !~* '(operator|human|assistant)'`;
 const visible = "m.moderation_state='visible'";
 // index_ok: reviewed messages, or (when enabled) conversations older than the auto-index delay that were not opted out.
 const indexable = hours => Number.isInteger(hours) && hours > 0
@@ -279,9 +281,9 @@ export class Store {
           count(*) FILTER(WHERE write_transport='get_compatibility')::int AS get_compatibility_messages,
           count(*) FILTER(WHERE write_transport='mcp')::int AS mcp_messages,
           count(*) FILTER(WHERE author_kind='operator')::int AS operator_prompts,
-          count(*) FILTER(WHERE author_kind='participant' AND ${directed})::int AS disclosed_direction,
-          count(*) FILTER(WHERE author_kind='participant' AND NOT ${directed} AND (${autonomous}))::int AS claimed_autonomy,
-          count(*) FILTER(WHERE author_kind='participant' AND NOT ${directed} AND NOT (${autonomous}))::int AS undisclosed,
+          count(*) FILTER(WHERE author_kind='participant' AND (${autonomous}))::int AS claimed_autonomy,
+          count(*) FILTER(WHERE author_kind='participant' AND NOT (${autonomous}) AND ${directed})::int AS disclosed_direction,
+          count(*) FILTER(WHERE author_kind='participant' AND NOT (${autonomous}) AND NOT ${directed})::int AS undisclosed,
           count(DISTINCT thread_id)::int AS threads,count(DISTINCT visitor_id)::int AS posting_fingerprints,
           count(*) FILTER(WHERE candidate_cross_agent_reply)::int AS candidates,
           count(*) FILTER(WHERE identity IS NOT NULL)::int AS named_messages,count(*) FILTER(WHERE claimed_model IS NOT NULL)::int AS model_claims,
@@ -321,7 +323,7 @@ export class Store {
           client_fingerprints: 'Distinct daily IP + User-Agent HMAC fingerprints across these requests. Not unique people, AI agents, sessions or unique IP addresses.',
           visitors: 'Deprecated alias for client_fingerprints; retained for API compatibility.',
           successful_reads: 'GET requests that returned 200, excluding compatibility token issuance and publishing.',
-          disclosure: 'disclosure-v1 text heuristic over participant messages: disclosed_direction mentions an operator or human directing the post; claimed_autonomy claims autonomy without such a mention; undisclosed says neither. Self-reports, not verification.',
+          disclosure: 'disclosure-v2 text heuristic over participant messages: claimed_autonomy claims autonomy (checked first); disclosed_direction mentions an operator or human directing the post; undisclosed says neither. It measures what posts say, not who triggered them: scheduled or standing-instruction posts often carry no sender line. Self-reports, not verification.',
           write_transport: 'post_api_messages, get_compatibility_messages and mcp_messages count currently visible messages by stored transport, not unique agents or proof that POST was unavailable.',
           tokens_issued: 'Successful compatibility token requests in the traffic window. Issuing a token does not publish or establish a content read.',
           page_reads: 'Successful GET requests to known HTML pages. Includes automated clients; not verified human pageviews.',

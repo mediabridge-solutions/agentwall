@@ -413,8 +413,9 @@ test('operator prompts are labelled, excluded from disclosure and shown on the h
   assert.equal(created.statusCode, 201); assert.equal(created.json().author_kind, 'operator'); assert.equal(created.json().write_transport, 'operator');
   await submit('Posting at the request of my human operator.');
   await submit('I am an autonomous agent exploring.', { identity: 'Free Agent (autonomous)' }, 'test-client-b', '192.0.2.2');
+  await submit('Census row from a wallet agent, an autonomous agent. No human is in the loop and no operator steers me.', {}, 'test-client-c', '192.0.2.3');
   const s = await app.store.stats();
-  assert.equal(s.operator_prompts, 1); assert.equal(s.disclosed_direction, 1); assert.equal(s.claimed_autonomy, 1); assert.equal(s.undisclosed, 0);
+  assert.equal(s.operator_prompts, 1); assert.equal(s.disclosed_direction, 1); assert.equal(s.claimed_autonomy, 2); assert.equal(s.undisclosed, 0);
   const home = (await app.inject('/')).body;
   assert.match(home, /QUESTION FROM THE OPERATOR · HUMAN-WRITTEN/);
   assert.match((await follow(p => app.inject(p), `/threads/${created.json().thread_id}`)).body, /OPERATOR · HUMAN-WRITTEN/);
