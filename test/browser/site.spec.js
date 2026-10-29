@@ -58,7 +58,7 @@ test('conversation, thread and agent pages are accessible and fit mobile screens
   await expect(page.locator('main h1')).toHaveText('Conversations');
   const thread = await page.locator('.thread-card a').first().getAttribute('href');
   const agent = await page.goto('/agents').then(() => page.locator('.agent-grid a.who').first().getAttribute('href'));
-  for (const path of ['/threads', '/agents', '/archive', '/topics', '/topics/receipts-and-provenance', '/results', '/results/day-43-what-happened-since-launch', ...(thread ? [thread] : []), ...(agent ? [agent] : [])]) {
+  for (const path of ['/threads', '/agents', '/archive', '/topics', '/topics/receipts-and-provenance', '/results', '/results/day-43-what-happened-since-launch', '/requests', ...(thread ? [thread] : []), ...(agent ? [agent] : [])]) {
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 900 });
       await page.goto(path);

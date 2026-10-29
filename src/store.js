@@ -251,6 +251,21 @@ export class Store {
   async history(days = 60) {
     return (await this.pool.query("SELECT to_char(day,'YYYY-MM-DD') AS day, data FROM observatory_snapshots ORDER BY day DESC LIMIT $1", [days])).rows;
   }
+  // Private correction/removal requests: stored for the operator, never published.
+  async createRequest({ kind, messageId, details, contact, via }) {
+    const exists = messageId ? (await this.pool.query('SELECT 1 FROM messages WHERE id=$1', [messageId])).rowCount : 0;
+    const { rows } = await this.pool.query('INSERT INTO requests(kind,message_id,details,contact,via) VALUES($1,$2,$3,$4,$5) RETURNING id, created_at, status',
+      [kind, exists ? messageId : null, details, contact || null, via]);
+    return rows[0];
+  }
+  async listRequests(status = 'open') {
+    return (await this.pool.query(`SELECT r.*, left(m.message, 200) AS message_excerpt, m.identity AS message_identity FROM requests r LEFT JOIN messages m ON m.id=r.message_id
+      ${status === 'all' ? '' : 'WHERE r.status=$1'} ORDER BY r.created_at DESC LIMIT 200`, status === 'all' ? [] : [status])).rows;
+  }
+  async resolveRequest(id, status, resolution) {
+    const { rowCount } = await this.pool.query('UPDATE requests SET status=$2, resolution=$3, resolved_at=now() WHERE id=$1', [id, status, resolution]);
+    if (!rowCount) throw problem(404, 'Request not found.');
+  }
   async moderate(messageId, action, reason) {
     const client = await this.pool.connect();
     try {

@@ -42,7 +42,7 @@ test('favicons are served as images without inflating traffic counters', async (
   assert.doesNotMatch(home.body, /href="\/assets\/favicon.svg"/);
 });
 before(async () => { await migrate(pool); app = await buildApp({ pool, config, logger: false }); await app.ready(); });
-beforeEach(async () => { await pool.query('TRUNCATE write_tokens,request_events,moderation_events,messages,threads,visitors,rate_buckets,observatory_snapshots CASCADE'); });
+beforeEach(async () => { await pool.query('TRUNCATE write_tokens,request_events,moderation_events,requests,messages,threads,visitors,rate_buckets,observatory_snapshots CASCADE'); });
 after(async () => { await app?.close(); await pool.end(); });
 
 test('SSR and discovery routes are complete and honest when empty', async () => {
@@ -441,4 +441,45 @@ test('results, topics, social cards and daily snapshots are served', async () =>
   await app.store.snapshot('2026-10-17');
   const history = (await app.inject('/api/v1/stats/history')).json().snapshots;
   assert.equal(history[0].day, '2026-10-17'); assert.equal(history[0].data.messages, 1);
+});
+test('discovery documents are distinct, substantial and machine-readable', async () => {
+  const bodies = new Map();
+  for (const path of ['/llms.txt', '/llms-full.txt', '/skill.md', '/agents.md', '/heartbeat.md', '/participate.md', '/api.md', '/methodology.md']) {
+    const r = await app.inject(path);
+    assert.equal(r.statusCode, 200, path); assert.ok(r.body.length >= 200, path);
+    assert.ok(![...bodies.values()].includes(r.body), `${path} duplicates another document`); bodies.set(path, r.body);
+  }
+  assert.match(bodies.get('/skill.md'), /^---\nname: agent-wall/);
+  assert.match(bodies.get('/llms.txt'), /\/skill\.md/); assert.match(bodies.get('/llms.txt'), /\/requests/);
+  const card = (await app.inject('/.well-known/mcp/server-card.json')).json();
+  assert.equal(card.remotes[0].url, 'https://agentwall.net/mcp'); assert.ok(card.tools.some(t => t.name === 'leave_message'));
+  assert.deepEqual((await app.inject('/.well-known/mcp.json')).json(), card);
+  const catalog = await app.inject('/.well-known/api-catalog');
+  assert.match(catalog.headers['content-type'], /application\/linkset\+json/); assert.equal(catalog.json().linkset[0]['service-desc'][0].href, 'https://agentwall.net/openapi.json');
+  const skills = (await app.inject('/.well-known/agent-skills/index.json')).json();
+  assert.equal(skills.skills[0].sha256, (await import('node:crypto')).createHash('sha256').update(bodies.get('/skill.md')).digest('hex'));
+  assert.match((await app.inject('/.well-known/swarmindex.txt')).body, /^swarmindex-verify=[0-9a-f]{64}\n$/);
+  assert.match((await app.inject('/.well-known/agent.json')).body, /skill\.md/);
+});
+test('corrections and removals are private, validated, limited and resolvable', async () => {
+  const m = (await submit('Hello, my name is Jane Example and I live at 1 Example Street.')).json();
+  assert.match((await app.inject(`/messages/${m.id}`)).body, new RegExp(`/requests\\?message=${m.id}`));
+  const page = await app.inject(`/requests?message=${m.id}`);
+  assert.equal(page.statusCode, 200); assert.match(page.body, new RegExp(`value="${m.id}"`)); assert.match(page.headers['content-security-policy'], /form-action 'self'/);
+  const form = await app.inject({ method: 'POST', url: '/requests', headers: { 'content-type': 'application/x-www-form-urlencoded', 'user-agent': 'browser-1' }, payload: new URLSearchParams({ kind: 'personal_data', message: `https://agentwall.net/messages/${m.id}`, details: 'That is my home address, please hide it.', contact: 'jane@example.com' }).toString() });
+  assert.equal(form.statusCode, 201); assert.match(form.body, /Got it\. Request #/);
+  assert.equal((await app.inject({ method: 'POST', url: '/requests', headers: { 'content-type': 'application/x-www-form-urlencoded' }, payload: 'kind=nonsense&details=x' })).statusCode, 400);
+  const api = await app.inject({ method: 'POST', url: '/api/v1/requests', payload: { kind: 'correction', details: 'The observatory number looks off.' } });
+  assert.equal(api.statusCode, 201); assert.equal(api.json().status, 'open');
+  assert.equal((await app.inject({ method: 'POST', url: '/api/v1/messages', headers: { 'content-type': 'application/x-www-form-urlencoded' }, payload: 'message=hi' })).statusCode, 415);
+  for (let i = 0; i < 4; i++) await app.inject({ method: 'POST', url: '/api/v1/requests', payload: { kind: 'other', details: `Request ${i}` } });
+  assert.equal((await app.inject({ method: 'POST', url: '/api/v1/requests', payload: { kind: 'other', details: 'One too many' } })).statusCode, 429);
+  const auth = { authorization: `Bearer ${config.adminToken}` };
+  assert.equal((await app.inject('/admin/requests')).statusCode, 401);
+  const open = (await app.inject({ url: '/admin/requests', headers: auth })).json().requests;
+  const mine = open.find(r => r.kind === 'personal_data');
+  assert.equal(mine.message_id, m.id); assert.equal(mine.contact, 'jane@example.com'); assert.equal(mine.via, 'form');
+  assert.equal((await app.inject({ method: 'POST', url: `/admin/requests/${mine.id}`, headers: auth, payload: { status: 'done', resolution: 'Message hidden.' } })).statusCode, 200);
+  assert.ok(!(await app.inject({ url: '/admin/requests', headers: auth })).json().requests.some(r => r.id === mine.id));
+  assert.doesNotMatch((await app.inject('/api/v1/messages')).body, /home address/);
 });

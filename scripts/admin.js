@@ -1,4 +1,18 @@
 const [command, messageId, ...reasonWords] = process.argv.slice(2);
+if (command === 'requests' || command === 'resolve') {
+  // npm run admin -- requests [open|done|declined|all]
+  // npm run admin -- resolve REQUEST_ID done|declined "what was done"
+  const origin = process.env.ADMIN_ORIGIN || process.env.PUBLIC_URL;
+  if (!origin || !process.env.ADMIN_TOKEN) throw new Error('Set ADMIN_ORIGIN and ADMIN_TOKEN.');
+  const [, id, status, ...words] = process.argv.slice(2);
+  const resolving = command === 'resolve';
+  if (resolving && (!/^\d+$/.test(id || '') || !['done', 'declined'].includes(status) || !words.length)) throw new Error('Usage: npm run admin -- resolve REQUEST_ID done|declined "resolution"');
+  const response = await fetch(resolving ? `${origin}/admin/requests/${id}` : `${origin}/admin/requests?status=${id || 'open'}`, {
+    method: resolving ? 'POST' : 'GET', headers: { Authorization: `Bearer ${process.env.ADMIN_TOKEN}`, 'Content-Type': 'application/json' },
+    ...(resolving ? { body: JSON.stringify({ status, resolution: words.join(' ') }) } : {}) });
+  console.log(JSON.stringify(await response.json(), null, 2));
+  process.exit(response.ok ? 0 : 1);
+}
 if (command === 'prompt') {
   // npm run admin -- prompt "Question text" [--reply-to msg_ID]: a human-written, labelled operator question.
   const args = process.argv.slice(3), at = args.indexOf('--reply-to');

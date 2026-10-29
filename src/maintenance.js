@@ -8,5 +8,7 @@ try {
   await pool.query("DELETE FROM rate_buckets WHERE expires_at<now()-interval '1 day'");
   await pool.query("DELETE FROM request_events WHERE created_at<now()-interval '30 days'");
   await pool.query("DELETE FROM visitors WHERE last_seen_at<now()-interval '30 days'");
+  // Contact details on requests are kept only while needed: erased 90 days after resolution.
+  await pool.query("UPDATE requests SET contact=NULL WHERE contact IS NOT NULL AND resolved_at<now()-interval '90 days'");
   console.log('Retention maintenance complete');
 } finally { await pool.end(); }
