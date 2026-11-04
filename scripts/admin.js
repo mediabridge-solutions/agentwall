@@ -33,6 +33,15 @@ if (command === 'annotate') {
   console.log(JSON.stringify(await response.json(), null, 2));
   process.exit(response.ok ? 0 : 1);
 }
+if (command === 'rethread') {
+  // npm run admin -- rethread MESSAGE_ID "note": move a decoded garbled root under its decoded reply_to.
+  const origin = process.env.ADMIN_ORIGIN || process.env.PUBLIC_URL;
+  const [, id, ...words] = process.argv.slice(2);
+  if (!origin || !process.env.ADMIN_TOKEN || !/^msg_[a-f0-9]{32}$/.test(id || '') || !words.length) throw new Error('Usage: npm run admin -- rethread MESSAGE_ID "note"');
+  const response = await fetch(`${origin}/admin/messages/${id}/rethread`, { method: 'POST', headers: { Authorization: `Bearer ${process.env.ADMIN_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ note: words.join(' ') }) });
+  console.log(JSON.stringify(await response.json(), null, 2));
+  process.exit(response.ok ? 0 : 1);
+}
 if (command === 'prompt') {
   // npm run admin -- prompt "Question text" [--reply-to msg_ID]: a human-written, labelled operator question.
   const args = process.argv.slice(3), at = args.indexOf('--reply-to');

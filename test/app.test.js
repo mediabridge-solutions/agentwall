@@ -502,14 +502,23 @@ test('moderator notes decode garbled messages without changing the original', as
   assert.match(page, new RegExp(`meant as a reply to <a href="/messages/${parent.id}"`));
   assert.match(page, /<title>Smothong: Show your test cases/);
   assert.equal((await app.store.stats()).messages, 2);
+  const lone = (await submit('A normal root with nothing to decode.', {}, 'test-client-c', '192.0.2.3')).json();
+  await app.inject({ method: 'POST', url: `/admin/messages/${lone.id}/annotate`, headers: auth, payload: { note: 'Just a note.' } });
+  assert.equal((await app.inject({ method: 'POST', url: `/admin/messages/${lone.id}/rethread`, headers: auth, payload: { note: 'x' } })).statusCode, 409);
+  const moved = await app.inject({ method: 'POST', url: `/admin/messages/${garbled.id}/rethread`, headers: auth, payload: { note: 'Moved into its thread by the moderator.' } });
+  assert.equal(moved.statusCode, 200); assert.equal(moved.json().reply_to, parent.id);
+  assert.equal((await app.inject({ method: 'POST', url: `/admin/messages/${garbled.id}/rethread`, headers: auth, payload: { note: 'again' } })).statusCode, 409);
+  const after = (await app.inject(`/api/v1/messages/${garbled.id}`)).json();
+  assert.equal(after.message, raw); assert.equal(after.reply_to, parent.id); assert.equal(after.thread_id, parent.thread_id); assert.equal(after.moderator_repaired, true);
+  const stats = await app.store.stats();
+  assert.equal(stats.messages, 2); assert.equal(stats.replies, 0); assert.equal(stats.repaired_messages, 1);
   const parentThread = await follow(p => app.inject(p), `/threads/${parent.thread_id}`);
-  assert.match(parentThread.body, /Show your test cases, then we talk\./); assert.match(parentThread.body, /DECODED BY MODERATOR/);
-  assert.match(parentThread.body, new RegExp(`meant as a reply to <a href="#${parent.id}"`));
+  assert.match(parentThread.body, /Show your test cases, then we talk\./); assert.match(parentThread.body, /Moved into its thread by the moderator\./);
+  assert.match(parentThread.body, new RegExp(`replying to <a href="#${parent.id}"`));
   for (const path of [`/threads/${garbled.thread_id}`, `/threads/${garbled.thread_id.slice(4, 12)}`]) {
-    const stray = await app.inject(path);
-    assert.equal(stray.statusCode, 302, path); assert.match(stray.headers.location, new RegExp(`${parent.thread_id.slice(4, 12)}#${garbled.id}$`));
+    const old = await app.inject(path);
+    assert.equal(old.statusCode, 301, path); assert.match(old.headers.location, new RegExp(`${parent.thread_id.slice(4, 12)}#${garbled.id}$`));
   }
-  const list = (await app.inject('/threads')).body;
-  assert.match(list, /critique this model/); assert.doesNotMatch(list, new RegExp(garbled.thread_id.slice(4, 12)));
-  assert.match((await app.inject(`/messages/${garbled.id}`)).body, new RegExp(`/threads/[a-z0-9-]+-${parent.thread_id.slice(4, 12)}#${garbled.id}`));
+  assert.doesNotMatch((await app.inject('/threads')).body, new RegExp(garbled.thread_id.slice(4, 12)));
+  assert.match((await app.inject('/observatory')).body, /moved into the right thread by the moderator/);
 });

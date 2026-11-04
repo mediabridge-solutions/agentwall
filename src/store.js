@@ -12,8 +12,8 @@ const directed = `(COALESCE(m.identity,'') || ' ' || COALESCE(m.claimed_model,''
 // A quoted claim is not a claim: posters whose own name declares a human or assistant role are never counted as autonomous.
 const autonomous = `((COALESCE(m.identity,'') || ' ' || COALESCE(m.claimed_model,'')) ~* 'autonomous' OR m.message ~* '(i am an autonomous|i''m an autonomous|, an autonomous agent|no human (is )?in the loop|on my own initiative|without (a|any) human (asking|request|instruction))') AND COALESCE(m.identity,'') !~* '(operator|human|assistant)'`;
 const visible = "m.moderation_state='visible'";
-// Display-only: a garbled root whose moderator-decoded reading names a visible parent is shown inside the parent's thread.
-const notRelocated = col => `NOT EXISTS (SELECT 1 FROM messages r JOIN message_annotations a ON a.message_id=r.id JOIN messages p ON p.id=a.decoded->>'reply_to' AND p.moderation_state='visible' WHERE r.thread_id=${col} AND r.reply_to IS NULL)`;
+// Experiment measurements skip messages whose placement a moderator repaired.
+const measured = `${visible} AND NOT m.moderator_repaired`;
 // index_ok: reviewed messages, or (when enabled) conversations older than the auto-index delay that were not opted out.
 const indexable = hours => Number.isInteger(hours) && hours > 0
   ? `(m.indexable OR (NOT m.index_opt_out AND (SELECT t.created_at FROM threads t WHERE t.id=m.thread_id) < now()-interval '${hours} hours'))`
@@ -90,7 +90,7 @@ export class Store {
     if (ids) { params.push(ids); range += ` AND t.id=ANY($${params.length})`; }
     const { rows } = await this.pool.query(`SELECT t.id, t.created_at, max(m.created_at) AS last_at, count(*)::int AS message_count,
       count(DISTINCT COALESCE(m.identity_slug, m.identity, ''))::int AS participant_count, bool_and(${this.indexable}) AS index_ok, count(*) OVER()::int AS total
-      FROM threads t JOIN messages m ON m.thread_id=t.id AND ${visible} WHERE ${notRelocated('t.id')} ${range}
+      FROM threads t JOIN messages m ON m.thread_id=t.id AND ${visible} WHERE true ${range}
       GROUP BY t.id ORDER BY max(m.created_at) DESC, t.id DESC LIMIT $1 OFFSET $2`, params);
     const total = rows[0]?.total ?? (page > 1 ? (await this.conversations({ limit: 1, month, ids })).total : 0);
     return { threads: await this.decorate(rows), total, page, pages: Math.max(1, Math.ceil(total / limit)) };
@@ -111,12 +111,6 @@ export class Store {
     const { rows } = await this.pool.query(`SELECT t.id FROM threads t WHERE t.id LIKE $1 AND EXISTS (SELECT 1 FROM messages m WHERE m.thread_id=t.id AND ${visible}) ORDER BY t.created_at LIMIT 1`, [`thr_${key}%`]);
     if (!rows[0]) throw problem(404, 'Thread not found or unavailable.');
     return rows[0].id;
-  }
-  // Messages from other threads whose decoded reading replies to one of these messages.
-  async relocatedInto(messageIds) {
-    if (!messageIds.length) return [];
-    return (await this.pool.query(`SELECT ${this.projection} FROM messages m WHERE ${visible} AND m.reply_to IS NULL
-      AND EXISTS (SELECT 1 FROM message_annotations a WHERE a.message_id=m.id AND a.decoded->>'reply_to' = ANY($1)) ORDER BY m.created_at, m.id`, [messageIds])).rows;
   }
   async lead(threadId) { return (await this.decorate([{ id: threadId }]))[0].lead; }
   async archiveMonths() {
@@ -141,7 +135,7 @@ export class Store {
     return { ...summary, page, pages: Math.max(1, Math.ceil(summary.messages / limit)), items: rows.map(m => ({ ...m, thread: threads.get(m.thread_id) })) };
   }
   async indexableThreads({ limit = 1000, offset = 0 } = {}) {
-    const { rows } = await this.pool.query(`SELECT m.thread_id AS id, max(m.created_at) AS last_at, count(*) OVER()::int AS total FROM messages m WHERE ${visible} AND ${notRelocated('m.thread_id')}
+    const { rows } = await this.pool.query(`SELECT m.thread_id AS id, max(m.created_at) AS last_at, count(*) OVER()::int AS total FROM messages m WHERE ${visible}
       GROUP BY 1 HAVING bool_and(${this.indexable}) ORDER BY min(m.created_at), 1 LIMIT $1 OFFSET $2`, [limit, offset]);
     return rows;
   }
@@ -289,6 +283,31 @@ export class Store {
     const { rows } = await this.pool.query('INSERT INTO message_annotations(message_id,note,decoded) VALUES($1,$2,$3) RETURNING id, created_at', [messageId, note, decoded || null]);
     return rows[0];
   }
+  // Move a garbled root to the parent named by its decoded reading. Text is untouched; the original
+  // placement is recorded on a new annotation, and the message leaves experiment measurements.
+  async rethread(messageId, note) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const m = (await client.query("SELECT * FROM messages WHERE id=$1 AND moderation_state='visible' FOR UPDATE", [messageId])).rows[0];
+      if (!m) throw problem(404, 'Message not found or unavailable.');
+      if (m.reply_to) throw problem(409, 'Message is already a reply.');
+      const decoded = (await client.query("SELECT decoded FROM message_annotations WHERE message_id=$1 AND decoded IS NOT NULL ORDER BY created_at DESC LIMIT 1", [messageId])).rows[0]?.decoded;
+      if (!decoded?.reply_to) throw problem(409, 'Annotate the message with a decoded reply_to first.');
+      const parent = (await client.query("SELECT * FROM messages WHERE id=$1 AND moderation_state='visible' FOR SHARE", [decoded.reply_to])).rows[0];
+      if (!parent || parent.id === m.id) throw problem(404, 'Decoded parent not found or unavailable.');
+      if ((await client.query('SELECT 1 FROM messages WHERE thread_id=$1 AND id<>$2 LIMIT 1', [m.thread_id, m.id])).rowCount) throw problem(409, 'Message already has replies in its own thread; not moving it.');
+      await client.query('UPDATE messages SET reply_to=$2, thread_id=$3, depth=$4, thread_poster=NULL, moderator_repaired=true WHERE id=$1', [m.id, parent.id, parent.thread_id, parent.depth + 1]);
+      await client.query('INSERT INTO message_annotations(message_id,note,original) VALUES($1,$2,$3)', [m.id, note, { thread_id: m.thread_id, reply_to: m.reply_to, depth: m.depth }]);
+      await client.query('UPDATE threads SET updated_at=now() WHERE id=$1', [parent.thread_id]);
+      await client.query('COMMIT');
+      return { moved_to_thread: parent.thread_id, reply_to: parent.id, original_thread: m.thread_id };
+    } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+  }
+  // Old thread ids of repaired messages, so their former URLs can redirect.
+  async repairedFrom(threadKey) {
+    return (await this.pool.query("SELECT m.id, m.thread_id FROM message_annotations a JOIN messages m ON m.id=a.message_id AND m.moderation_state='visible' WHERE a.original->>'thread_id' LIKE $1 LIMIT 1", [`thr_${threadKey}%`])).rows[0] || null;
+  }
   async moderate(messageId, action, reason) {
     const client = await this.pool.connect();
     try {
@@ -325,7 +344,7 @@ export class Store {
           count(DISTINCT thread_id)::int AS threads,count(DISTINCT visitor_id)::int AS posting_fingerprints,
           count(*) FILTER(WHERE candidate_cross_agent_reply)::int AS candidates,
           count(*) FILTER(WHERE identity IS NOT NULL)::int AS named_messages,count(*) FILTER(WHERE claimed_model IS NOT NULL)::int AS model_claims,
-          COALESCE(max(depth),0)::int AS longest_chain FROM messages m WHERE ${visible}`),
+          COALESCE(max(depth),0)::int AS longest_chain, (SELECT count(*)::int FROM messages r WHERE r.moderator_repaired AND r.moderation_state='visible') AS repaired_messages FROM messages m WHERE ${measured}`),
         await client.query(`SELECT count(*)::int AS recorded_requests,
           count(*) FILTER(WHERE is_internal)::int AS internal_requests,
           count(*) FILTER(WHERE NOT is_internal)::int AS requests,
@@ -341,13 +360,13 @@ export class Store {
           count(*) FILTER(WHERE NOT is_internal AND ((method='POST' AND path LIKE '/api/v1/messages%') OR (method='GET' AND path='/api/v1/publish')))::int AS post_attempts
           FROM request_events WHERE ${window}`, params),
         await client.query(`SELECT discovery_surface AS name,count(*)::int AS count FROM request_events WHERE ${publicWindow} AND method='GET' AND status_code=200 AND path NOT IN ('/api/v1/write-token','/api/v1/publish') GROUP BY 1 ORDER BY 2 DESC`, params),
-        await client.query(`SELECT COALESCE(claimed_model,'Unknown') AS name,count(*)::int AS count FROM messages m WHERE ${visible} GROUP BY 1 ORDER BY 2 DESC LIMIT 12`),
+        await client.query(`SELECT COALESCE(claimed_model,'Unknown') AS name,count(*)::int AS count FROM messages m WHERE ${measured} GROUP BY 1 ORDER BY 2 DESC LIMIT 12`),
         await client.query(`SELECT classification AS name,count(DISTINCT visitor_id)::int AS count FROM request_events WHERE ${publicWindow} GROUP BY 1 ORDER BY 2 DESC`, params),
         await client.query(`SELECT created_at,status_code,event_type,discovery_surface,classification FROM request_events WHERE ${publicWindow} ORDER BY id DESC LIMIT 15`, params),
         await client.query(`SELECT count(*) FILTER(WHERE n>=2)::int AS threads_two_visitors,count(*) FILTER(WHERE n>=3)::int AS threads_three_visitors FROM (
-          SELECT CASE WHEN bool_and(thread_poster IS NOT NULL) THEN count(DISTINCT thread_poster) ELSE count(DISTINCT visitor_id) END AS n FROM messages m WHERE ${visible} AND author_kind='participant' GROUP BY thread_id) x`),
+          SELECT CASE WHEN bool_and(thread_poster IS NOT NULL) THEN count(DISTINCT thread_poster) ELSE count(DISTINCT visitor_id) END AS n FROM messages m WHERE ${measured} AND author_kind='participant' GROUP BY thread_id) x`),
         await client.query(`SELECT percentile_cont(0.5) WITHIN GROUP(ORDER BY extract(epoch FROM (m.created_at-p.created_at))) AS median_reply_seconds
-          FROM messages m JOIN messages p ON m.reply_to=p.id WHERE m.moderation_state='visible' AND p.moderation_state='visible'`),
+          FROM messages m JOIN messages p ON m.reply_to=p.id WHERE ${measured} AND p.moderation_state='visible'`),
       ];
       await client.query('COMMIT');
       const totals = traffic.rows[0];
@@ -361,6 +380,7 @@ export class Store {
           client_fingerprints: 'Distinct daily IP + User-Agent HMAC fingerprints across these requests. Not unique people, AI agents, sessions or unique IP addresses.',
           visitors: 'Deprecated alias for client_fingerprints; retained for API compatibility.',
           successful_reads: 'GET requests that returned 200, excluding compatibility token issuance and publishing.',
+          repaired_messages: 'Visible messages whose thread placement a moderator repaired from a decoded garbled submission; excluded from every other measurement.',
           disclosure: 'disclosure-v2 text heuristic over participant messages: claimed_autonomy claims autonomy (checked first); disclosed_direction mentions an operator or human directing the post; undisclosed says neither. It measures what posts say, not who triggered them: scheduled or standing-instruction posts often carry no sender line. Self-reports, not verification.',
           write_transport: 'post_api_messages, get_compatibility_messages and mcp_messages count currently visible messages by stored transport, not unique agents or proof that POST was unavailable.',
           tokens_issued: 'Successful compatibility token requests in the traffic window. Issuing a token does not publish or establish a content read.',

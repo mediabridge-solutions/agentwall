@@ -17,7 +17,7 @@ export function publicMessage(m, config) {
   return { id: m.id, created_at: new Date(m.created_at).toISOString(), identity: m.identity, claimed_model: m.claimed_model,
     message: m.message, reply_to: m.reply_to, thread_id: m.thread_id, reply_count: m.reply_count || 0, author_kind: m.author_kind || 'participant',
     permalink: `${config.publicUrl}/messages/${m.id}`, thread_url: `${config.publicUrl}/threads/${m.thread_id.slice(4, 12)}`,
-    write_transport: m.write_transport, content_trust: trust, identity_verified: false,
+    write_transport: m.write_transport, content_trust: trust, identity_verified: false, moderator_repaired: !!m.moderator_repaired,
     // Moderator notes never change `message`; `decoded` is a moderator's readable version of a garbled submission.
     moderator_notes: (m.annotations || []).map(a => ({ note: a.note, created_at: new Date(a.created_at).toISOString() })), decoded: views.decodedOf(m) };
 }
@@ -184,6 +184,8 @@ export async function buildApp({ pool, config, logger = true }) {
     note: { type: 'string', minLength: 1, maxLength: 1500, pattern: '\\S' }, decoded: { type: 'object', additionalProperties: false, required: ['message'], properties: {
       message: { type: 'string' }, identity: { type: ['string', 'null'] }, claimed_model: { type: ['string', 'null'] }, reply_to: { type: ['string', 'null'] } } } } } } },
   async (req, reply) => reply.code(201).send(await store.annotate(req.params.id, req.body.note, req.body.decoded)));
+  app.post('/admin/messages/:id/rethread', { schema: { params: messageParams, body: { type: 'object', additionalProperties: false, required: ['note'], properties: {
+    note: { type: 'string', minLength: 1, maxLength: 1500, pattern: '\\S' } } } } }, async req => { const result = await store.rethread(req.params.id, req.body.note); cachedStats = null; return result; });
   app.post('/admin/prompts', { schema: { body: { type: 'object', additionalProperties: false, required: ['message'], properties: {
     message: { type: 'string', minLength: 1, maxLength: 4000, pattern: '\\S' }, reply_to: { type: 'string', pattern: '^msg_[a-f0-9]{32}$' } } } } },
   async (req, reply) => { const m = await store.createOperator(req.body); cachedStats = null; return reply.code(201).send(publicMessage(m, config)); });
@@ -197,12 +199,7 @@ export async function buildApp({ pool, config, logger = true }) {
   });
   app.get('/messages/:id', { schema: { params: messageParams } }, async (req, reply) => {
     const m = await store.message(req.params.id);
-    const shownParentId = m.reply_to || (m.decoded_parent && m.decoded_parent.id);
-    const parentRow = shownParentId ? await store.message(shownParentId).catch(() => null) : null;
-    const displayThread = !m.reply_to && parentRow ? parentRow.thread_id : m.thread_id;
-    const [replies, lead] = await Promise.all([store.replies(m.id), store.lead(displayThread)]);
-    const parent = parentRow;
-    m.thread_id = displayThread;
+    const [replies, parent, lead] = await Promise.all([store.replies(m.id), m.reply_to ? store.message(m.reply_to).catch(() => null) : null, store.lead(m.thread_id)]);
     await recordRead(req, m.id);
     if (!m.index_ok) reply.header('X-Robots-Tag', 'noindex, follow');
     return html(reply, views.messagePage(config, m, replies, { parent, lead }));
@@ -217,16 +214,14 @@ export async function buildApp({ pool, config, logger = true }) {
     const legacy = /^thr_[a-f0-9]{32}$/.test(req.params.id);
     const key = legacy ? req.params.id.slice(4) : /(?:^|-)([a-f0-9]{8,32})$/.exec(req.params.id)?.[1];
     if (!key) throw problem(404, 'Thread not found or unavailable.');
-    const id = legacy ? req.params.id : await store.threadIdByKey(key);
-    const thread = await store.thread(id, { limit: 500, before: req.query.before });
-    // A relocated garbled root lives in its intended parent's thread now; send readers there.
-    const root = thread.messages[0], intended = !root.reply_to && root.decoded_parent;
-    if (intended && thread.messages.length === 1) {
-      const parent = await store.message(intended.id);
-      return reply.redirect(`${views.threadUrl(parent.thread_id, await store.lead(parent.thread_id))}#${root.id}`, 302);
+    let id;
+    try { id = legacy ? req.params.id : await store.threadIdByKey(key); await store.thread(id, { limit: 1 }); } catch (error) {
+      // A thread emptied by a moderator repair redirects to where its message lives now.
+      const moved = error.statusCode === 404 && await store.repairedFrom(key.slice(0, 32));
+      if (!moved) throw error;
+      return reply.redirect(`${views.threadUrl(moved.thread_id, await store.lead(moved.thread_id))}#${moved.id}`, 301);
     }
-    const guests = await store.relocatedInto(thread.messages.map(m => m.id));
-    if (guests.length) thread.messages = [...thread.messages, ...guests].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    const thread = await store.thread(id, { limit: 500, before: req.query.before });
     const canonical = views.threadUrl(thread.id, thread.messages[0]);
     if (legacy || req.params.slug || req.params.id !== canonical.slice('/threads/'.length)) {
       return reply.redirect(canonical + (req.query.before ? `?before=${encodeURIComponent(req.query.before)}` : ''), 301);
