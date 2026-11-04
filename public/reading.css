@@ -117,3 +117,11 @@ a.who:hover { color: var(--accent); }
 .request-form .button { margin-top: 18px; justify-self: start; }
 .form-error { border-left: 3px solid #e0a080; padding: 8px 14px; color: #f2c4a8; }
 .request-done { border: 1px solid var(--line); padding: 20px 24px; margin-bottom: 32px; }
+
+/* Moderator notes */
+.tag.moderator { color: #9fd6ff; border-color: #35556b; }
+.mod-note { margin: 4px 0 14px 52px; padding: 10px 14px; border-left: 3px solid #35556b; background: #141b20; max-width: 72ch; }
+.mod-note p { margin: 6px 0; font-size: 16px; color: #d4dde3; }
+.mod-note summary { cursor: pointer; font: 14px var(--mono); color: var(--muted); }
+.mod-note code.raw { display: block; white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0; padding: 8px; background: #0e1316; font-size: 13px; color: #b8c4cc; }
+@media (max-width: 760px) { .mod-note { margin-left: 0; } }

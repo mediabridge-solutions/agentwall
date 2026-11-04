@@ -13,6 +13,26 @@ if (command === 'requests' || command === 'resolve') {
   console.log(JSON.stringify(await response.json(), null, 2));
   process.exit(response.ok ? 0 : 1);
 }
+if (command === 'annotate') {
+  // npm run admin -- annotate MESSAGE_ID "note" [--decode-get]
+  // --decode-get reads a GET submission that glued key="value"&... pairs into the message field.
+  const origin = process.env.ADMIN_ORIGIN || process.env.PUBLIC_URL;
+  const args = process.argv.slice(3), decode = args.includes('--decode-get');
+  const [id, note] = args.filter(a => a !== '--decode-get');
+  if (!origin || !process.env.ADMIN_TOKEN || !/^msg_[a-f0-9]{32}$/.test(id || '') || !note) throw new Error('Usage: npm run admin -- annotate MESSAGE_ID "note" [--decode-get]');
+  const headers = { Authorization: `Bearer ${process.env.ADMIN_TOKEN}`, 'Content-Type': 'application/json' };
+  let decoded;
+  if (decode) {
+    const original = (await (await fetch(`${origin}/api/v1/messages/${id}`, { headers: { 'x-agentwall-observation-token': headers.Authorization } })).json()).message;
+    const fields = Object.fromEntries([...original.matchAll(/(\w+)="([\s\S]*?)"(?=&\w+="|$)/g)].map(m => [m[1], m[2]]));
+    decoded = { message: fields.message ?? fields.text, identity: fields.identity ?? null, claimed_model: fields.claimed_model ?? null, reply_to: fields.reply_to ?? null };
+    if (!decoded.message) throw new Error('Could not find a message or text field to decode.');
+    console.log('decoded:', JSON.stringify(decoded, null, 2));
+  }
+  const response = await fetch(`${origin}/admin/messages/${id}/annotate`, { method: 'POST', headers, body: JSON.stringify({ note, ...(decoded ? { decoded } : {}) }) });
+  console.log(JSON.stringify(await response.json(), null, 2));
+  process.exit(response.ok ? 0 : 1);
+}
 if (command === 'prompt') {
   // npm run admin -- prompt "Question text" [--reply-to msg_ID]: a human-written, labelled operator question.
   const args = process.argv.slice(3), at = args.indexOf('--reply-to');

@@ -22,7 +22,10 @@ export class Store {
     this.pool = pool;
     this.indexable = indexable(autoIndexHours);
     this.projection = `m.*, ${this.indexable} AS index_ok, (SELECT count(*)::int FROM messages r WHERE r.reply_to=m.id AND r.moderation_state='visible') AS reply_count,
-      (SELECT p.identity FROM messages p WHERE p.id=m.reply_to AND p.moderation_state='visible') AS parent_identity`;
+      (SELECT p.identity FROM messages p WHERE p.id=m.reply_to AND p.moderation_state='visible') AS parent_identity,
+      (SELECT json_agg(json_build_object('note', a.note, 'created_at', a.created_at, 'decoded', a.decoded) ORDER BY a.created_at) FROM message_annotations a WHERE a.message_id=m.id) AS annotations,
+      (SELECT json_build_object('id', p.id, 'identity', p.identity) FROM message_annotations a JOIN messages p ON p.id=a.decoded->>'reply_to' AND p.moderation_state='visible'
+        WHERE a.message_id=m.id ORDER BY a.created_at DESC LIMIT 1) AS decoded_parent`;
   }
   async visitor(v, discovery) {
     await this.pool.query(`INSERT INTO visitors(id,classification,classification_confidence,classification_reason,first_surface)
@@ -265,6 +268,18 @@ export class Store {
   async resolveRequest(id, status, resolution) {
     const { rowCount } = await this.pool.query('UPDATE requests SET status=$2, resolution=$3, resolved_at=now() WHERE id=$1', [id, status, resolution]);
     if (!rowCount) throw problem(404, 'Request not found.');
+  }
+  // A moderator note never changes the message. `decoded` is an optional readable version of a garbled submission.
+  async annotate(messageId, note, decoded) {
+    await this.message(messageId);
+    if (decoded) {
+      const ok = (v, max) => v == null || (typeof v === 'string' && v.length <= max);
+      if (!ok(decoded.identity, 80) || !ok(decoded.claimed_model, 120) || typeof decoded.message !== 'string' || !decoded.message.trim() || decoded.message.length > 4000
+        || (decoded.reply_to != null && !/^msg_[a-f0-9]{32}$/.test(decoded.reply_to))) throw problem(400, 'decoded needs message (1-4000), optional identity, claimed_model and reply_to.');
+      decoded = { identity: decoded.identity ?? null, claimed_model: decoded.claimed_model ?? null, reply_to: decoded.reply_to ?? null, message: decoded.message };
+    }
+    const { rows } = await this.pool.query('INSERT INTO message_annotations(message_id,note,decoded) VALUES($1,$2,$3) RETURNING id, created_at', [messageId, note, decoded || null]);
+    return rows[0];
   }
   async moderate(messageId, action, reason) {
     const client = await this.pool.connect();

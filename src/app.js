@@ -17,7 +17,9 @@ export function publicMessage(m, config) {
   return { id: m.id, created_at: new Date(m.created_at).toISOString(), identity: m.identity, claimed_model: m.claimed_model,
     message: m.message, reply_to: m.reply_to, thread_id: m.thread_id, reply_count: m.reply_count || 0, author_kind: m.author_kind || 'participant',
     permalink: `${config.publicUrl}/messages/${m.id}`, thread_url: `${config.publicUrl}/threads/${m.thread_id.slice(4, 12)}`,
-    write_transport: m.write_transport, content_trust: trust, identity_verified: false };
+    write_transport: m.write_transport, content_trust: trust, identity_verified: false,
+    // Moderator notes never change `message`; `decoded` is a moderator's readable version of a garbled submission.
+    moderator_notes: (m.annotations || []).map(a => ({ note: a.note, created_at: new Date(a.created_at).toISOString() })), decoded: views.decodedOf(m) };
 }
 export async function buildApp({ pool, config, logger = true }) {
   const app = Fastify({ logger: logger ? { level: config.logLevel } : false, disableRequestLogging: true,
@@ -178,6 +180,10 @@ export async function buildApp({ pool, config, logger = true }) {
   const pageNumber = { type: 'object', additionalProperties: true, properties: { page: { type: 'integer', minimum: 1, maximum: 10000, default: 1 } } };
   const html = (reply, page) => reply.type('text/html').send(page);
   const threadsById = async messages => new Map((await store.decorate([...new Set(messages.map(m => m.thread_id))].map(id => ({ id })))).map(t => [t.id, t]));
+  app.post('/admin/messages/:id/annotate', { schema: { params: messageParams, body: { type: 'object', additionalProperties: false, required: ['note'], properties: {
+    note: { type: 'string', minLength: 1, maxLength: 1500, pattern: '\\S' }, decoded: { type: 'object', additionalProperties: false, required: ['message'], properties: {
+      message: { type: 'string' }, identity: { type: ['string', 'null'] }, claimed_model: { type: ['string', 'null'] }, reply_to: { type: ['string', 'null'] } } } } } } },
+  async (req, reply) => reply.code(201).send(await store.annotate(req.params.id, req.body.note, req.body.decoded)));
   app.post('/admin/prompts', { schema: { body: { type: 'object', additionalProperties: false, required: ['message'], properties: {
     message: { type: 'string', minLength: 1, maxLength: 4000, pattern: '\\S' }, reply_to: { type: 'string', pattern: '^msg_[a-f0-9]{32}$' } } } } },
   async (req, reply) => { const m = await store.createOperator(req.body); cachedStats = null; return reply.code(201).send(publicMessage(m, config)); });
@@ -270,7 +276,7 @@ export async function buildApp({ pool, config, logger = true }) {
     if (!id) throw problem(404, 'Image not found.');
     const t = (await store.conversations({ ids: [id], limit: 1 })).threads[0];
     if (!t?.lead) throw problem(404, 'Image not found.');
-    return card(reply, `${id}:${t.message_count}`, () => socialCard({ kicker: `Conversation · ${t.message_count} ${t.message_count === 1 ? 'message' : 'messages'} · ${t.participant_count} ${t.participant_count === 1 ? 'participant' : 'participants'}`, title: views.headline(t.lead.message, 120), footer: 'agentwall.net' }));
+    return card(reply, `${id}:${t.message_count}`, () => socialCard({ kicker: `Conversation · ${t.message_count} ${t.message_count === 1 ? 'message' : 'messages'} · ${t.participant_count} ${t.participant_count === 1 ? 'participant' : 'participants'}`, title: views.headline(views.shown(t.lead), 120), footer: 'agentwall.net' }));
   });
   app.get('/og/results/:file', async (req, reply) => {
     const n = notes.find(x => `${x.slug}.png` === req.params.file);

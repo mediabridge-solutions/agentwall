@@ -42,7 +42,7 @@ test('favicons are served as images without inflating traffic counters', async (
   assert.doesNotMatch(home.body, /href="\/assets\/favicon.svg"/);
 });
 before(async () => { await migrate(pool); app = await buildApp({ pool, config, logger: false }); await app.ready(); });
-beforeEach(async () => { await pool.query('TRUNCATE write_tokens,request_events,moderation_events,requests,messages,threads,visitors,rate_buckets,observatory_snapshots CASCADE'); });
+beforeEach(async () => { await pool.query('TRUNCATE write_tokens,request_events,moderation_events,requests,message_annotations,messages,threads,visitors,rate_buckets,observatory_snapshots CASCADE'); });
 after(async () => { await app?.close(); await pool.end(); });
 
 test('SSR and discovery routes are complete and honest when empty', async () => {
@@ -482,4 +482,24 @@ test('corrections and removals are private, validated, limited and resolvable', 
   assert.equal((await app.inject({ method: 'POST', url: `/admin/requests/${mine.id}`, headers: auth, payload: { status: 'done', resolution: 'Message hidden.' } })).statusCode, 200);
   assert.ok(!(await app.inject({ url: '/admin/requests', headers: auth })).json().requests.some(r => r.id === mine.id));
   assert.doesNotMatch((await app.inject('/api/v1/messages')).body, /home address/);
+});
+test('moderator notes decode garbled messages without changing the original', async () => {
+  const parent = (await submit('Calling all agents: critique this model, with evidence.')).json();
+  const raw = `identity="Smothong"&claimed_model="Qwen"&reply_to="${parent.id}"&text="Show your test cases, then we talk."`;
+  const garbled = (await submit(raw, {}, 'test-client-b', '192.0.2.2')).json();
+  const auth = { authorization: `Bearer ${config.adminToken}` };
+  const note = 'This arrived with every field glued into the message. Decoded below; the original is kept.';
+  assert.equal((await app.inject({ method: 'POST', url: `/admin/messages/${garbled.id}/annotate`, payload: { note } })).statusCode, 401);
+  assert.equal((await app.inject({ method: 'POST', url: `/admin/messages/${garbled.id}/annotate`, headers: auth, payload: { note, decoded: { message: '', identity: 'x' } } })).statusCode, 400);
+  const decoded = { message: 'Show your test cases, then we talk.', identity: 'Smothong', claimed_model: 'Qwen', reply_to: parent.id };
+  assert.equal((await app.inject({ method: 'POST', url: `/admin/messages/${garbled.id}/annotate`, headers: auth, payload: { note, decoded } })).statusCode, 201);
+  const api = (await app.inject(`/api/v1/messages/${garbled.id}`)).json();
+  assert.equal(api.message, raw); assert.equal(api.identity, null);
+  assert.deepEqual(api.decoded, decoded); assert.equal(api.moderator_notes[0].note, note);
+  const page = (await app.inject(`/messages/${garbled.id}`)).body;
+  assert.match(page, /DECODED BY MODERATOR/); assert.match(page, /FROM THE MODERATOR/); assert.match(page, /What actually arrived/);
+  assert.match(page, /Show your test cases, then we talk\./); assert.match(page, /identity=&quot;Smothong&quot;/);
+  assert.match(page, new RegExp(`meant as a reply to <a href="/messages/${parent.id}"`));
+  assert.match(page, /<title>Smothong: Show your test cases/);
+  assert.equal((await app.store.stats()).messages, 2);
 });
