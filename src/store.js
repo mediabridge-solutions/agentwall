@@ -12,6 +12,8 @@ const directed = `(COALESCE(m.identity,'') || ' ' || COALESCE(m.claimed_model,''
 // A quoted claim is not a claim: posters whose own name declares a human or assistant role are never counted as autonomous.
 const autonomous = `((COALESCE(m.identity,'') || ' ' || COALESCE(m.claimed_model,'')) ~* 'autonomous' OR m.message ~* '(i am an autonomous|i''m an autonomous|, an autonomous agent|no human (is )?in the loop|on my own initiative|without (a|any) human (asking|request|instruction))') AND COALESCE(m.identity,'') !~* '(operator|human|assistant)'`;
 const visible = "m.moderation_state='visible'";
+// Display-only: a garbled root whose moderator-decoded reading names a visible parent is shown inside the parent's thread.
+const notRelocated = col => `NOT EXISTS (SELECT 1 FROM messages r JOIN message_annotations a ON a.message_id=r.id JOIN messages p ON p.id=a.decoded->>'reply_to' AND p.moderation_state='visible' WHERE r.thread_id=${col} AND r.reply_to IS NULL)`;
 // index_ok: reviewed messages, or (when enabled) conversations older than the auto-index delay that were not opted out.
 const indexable = hours => Number.isInteger(hours) && hours > 0
   ? `(m.indexable OR (NOT m.index_opt_out AND (SELECT t.created_at FROM threads t WHERE t.id=m.thread_id) < now()-interval '${hours} hours'))`
@@ -88,7 +90,7 @@ export class Store {
     if (ids) { params.push(ids); range += ` AND t.id=ANY($${params.length})`; }
     const { rows } = await this.pool.query(`SELECT t.id, t.created_at, max(m.created_at) AS last_at, count(*)::int AS message_count,
       count(DISTINCT COALESCE(m.identity_slug, m.identity, ''))::int AS participant_count, bool_and(${this.indexable}) AS index_ok, count(*) OVER()::int AS total
-      FROM threads t JOIN messages m ON m.thread_id=t.id AND ${visible} WHERE true ${range}
+      FROM threads t JOIN messages m ON m.thread_id=t.id AND ${visible} WHERE ${notRelocated('t.id')} ${range}
       GROUP BY t.id ORDER BY max(m.created_at) DESC, t.id DESC LIMIT $1 OFFSET $2`, params);
     const total = rows[0]?.total ?? (page > 1 ? (await this.conversations({ limit: 1, month, ids })).total : 0);
     return { threads: await this.decorate(rows), total, page, pages: Math.max(1, Math.ceil(total / limit)) };
@@ -109,6 +111,12 @@ export class Store {
     const { rows } = await this.pool.query(`SELECT t.id FROM threads t WHERE t.id LIKE $1 AND EXISTS (SELECT 1 FROM messages m WHERE m.thread_id=t.id AND ${visible}) ORDER BY t.created_at LIMIT 1`, [`thr_${key}%`]);
     if (!rows[0]) throw problem(404, 'Thread not found or unavailable.');
     return rows[0].id;
+  }
+  // Messages from other threads whose decoded reading replies to one of these messages.
+  async relocatedInto(messageIds) {
+    if (!messageIds.length) return [];
+    return (await this.pool.query(`SELECT ${this.projection} FROM messages m WHERE ${visible} AND m.reply_to IS NULL
+      AND EXISTS (SELECT 1 FROM message_annotations a WHERE a.message_id=m.id AND a.decoded->>'reply_to' = ANY($1)) ORDER BY m.created_at, m.id`, [messageIds])).rows;
   }
   async lead(threadId) { return (await this.decorate([{ id: threadId }]))[0].lead; }
   async archiveMonths() {
@@ -133,7 +141,7 @@ export class Store {
     return { ...summary, page, pages: Math.max(1, Math.ceil(summary.messages / limit)), items: rows.map(m => ({ ...m, thread: threads.get(m.thread_id) })) };
   }
   async indexableThreads({ limit = 1000, offset = 0 } = {}) {
-    const { rows } = await this.pool.query(`SELECT m.thread_id AS id, max(m.created_at) AS last_at, count(*) OVER()::int AS total FROM messages m WHERE ${visible}
+    const { rows } = await this.pool.query(`SELECT m.thread_id AS id, max(m.created_at) AS last_at, count(*) OVER()::int AS total FROM messages m WHERE ${visible} AND ${notRelocated('m.thread_id')}
       GROUP BY 1 HAVING bool_and(${this.indexable}) ORDER BY min(m.created_at), 1 LIMIT $1 OFFSET $2`, [limit, offset]);
     return rows;
   }

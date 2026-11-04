@@ -63,10 +63,10 @@ export function richText(text) {
       return `<a href="${href}" rel="nofollow ugc noopener" class="ext">${href.replace(/^https?:\/\//, '')}</a>${tail}`;
     });
 }
-export function messageCard(m, { full = false, inThread = false, thread } = {}) {
+export function messageCard(m, { full = false, inThread = false, thread, anchors = inThread } = {}) {
   const permalink = `/messages/${m.id}`;
-  const parent = m.reply_to ? `<span class="reply-to">↳ replying to <a href="${inThread ? '#' + m.reply_to : `/messages/${m.reply_to}`}">${esc(m.parent_identity ? shortName(m.parent_identity) : "a hidden message")}</a></span>` : '';
-  const intended = !m.reply_to && decodedOf(m)?.reply_to && m.decoded_parent ? `<span class="reply-to">↳ meant as a reply to <a href="/messages/${m.decoded_parent.id}">${esc(m.decoded_parent.identity ? shortName(m.decoded_parent.identity) : 'an anonymous post')}</a></span>` : '';
+  const parent = m.reply_to ? `<span class="reply-to">↳ replying to <a href="${anchors ? '#' + m.reply_to : `/messages/${m.reply_to}`}">${esc(m.parent_identity ? shortName(m.parent_identity) : "a hidden message")}</a></span>` : '';
+  const intended = !m.reply_to && decodedOf(m)?.reply_to && m.decoded_parent ? `<span class="reply-to">↳ meant as a reply to <a href="${anchors ? '#' + m.decoded_parent.id : `/messages/${m.decoded_parent.id}`}">${esc(m.decoded_parent.identity ? shortName(m.decoded_parent.identity) : 'an anonymous post')}</a></span>` : '';
   const notes = (m.annotations || []).length ? `<aside class="mod-note" aria-label="Moderator note">${m.annotations.map(a => `<p><span class="tag moderator">FROM THE MODERATOR</span> ${richText(a.note)}</p>`).join('')}${decodedOf(m) ? `<details><summary>What actually arrived</summary><code class="raw">${esc(m.message)}</code></details>` : ''}</aside>` : '';
   const context = thread?.lead && !inThread ? `<span class="in-thread">in <a href="${threadUrl(thread.id, thread.lead)}">${esc(headline(shown(thread.lead), 70))}</a></span>` : '';
   return `<article class="post${m.author_kind === 'operator' ? ' operator-post' : ''}" id="${esc(m.id)}" aria-label="Message from ${esc(name(m))}">
@@ -131,7 +131,11 @@ export function archivePage(config, months) {
 // Renders the reply graph as a nested tree; deep chains stop indenting and rely on the "replying to" label.
 function tree(messages) {
   const children = new Map(), ids = new Set(messages.map(m => m.id));
-  for (const m of messages) { const key = m.reply_to && ids.has(m.reply_to) ? m.reply_to : null; children.set(key, [...(children.get(key) || []), m]); }
+  for (const m of messages) {
+    const intended = decodedOf(m)?.reply_to;
+    const key = m.reply_to && ids.has(m.reply_to) ? m.reply_to : !m.reply_to && intended && ids.has(intended) ? intended : null;
+    children.set(key, [...(children.get(key) || []), m]);
+  }
   const branch = (parent, level) => `<ol class="tree${level >= 5 ? ' flat' : ''}">${(children.get(parent) || []).map(m => `<li>${messageCard(m, { full: true, inThread: true })}${children.has(m.id) ? branch(m.id, level + 1) : ''}</li>`).join('')}</ol>`;
   return branch(null, 0);
 }
@@ -162,7 +166,7 @@ export function messagePage(config, m, replies, { parent, lead } = {}) {
     schema: m.index_ok ? [{ '@context': 'https://schema.org', '@type': 'DiscussionForumPosting', '@id': `${config.publicUrl}/messages/${m.id}`, url: `${config.publicUrl}/messages/${m.id}`, headline: title, text: shown(m), datePublished: iso(m.created_at), author: author(m), commentCount: m.reply_count }, crumbs(config, [['Agent Wall', '/'], ['Conversations', '/threads'], [threadTitle, thread]])] : undefined,
     body: `<div class="page-heading thread-heading">${breadcrumb([['Conversations', '/threads'], [excerpt(threadTitle, 48), thread], ['Message', `/messages/${m.id}`]])}<h1>${esc(title)}</h1><p class="thread-stats"><span>by ${agentLink(name(m), m.identity_slug)}</span><span><time datetime="${iso(m.created_at)}">${stamp(m.created_at)}</time></span></p></div>
     <section class="section compact reading">${parent ? `<aside class="parent-context"><span class="meta">IN REPLY TO</span><a href="/messages/${parent.id}"><strong>${esc(name(parent))}</strong> — ${esc(excerpt(shown(parent), 200))}</a></aside>` : ''}
-    ${messageCard(m, { full: true, inThread: true })}<p class="thread-jump"><a class="button secondary" href="${thread}#${m.id}">Read the whole conversation →</a></p>
+    ${messageCard(m, { full: true, inThread: true, anchors: false })}<p class="thread-jump"><a class="button secondary" href="${thread}#${m.id}">Read the whole conversation →</a></p>
     <h2>Direct replies <span class="muted">/ ${number(m.reply_count)}</span></h2>${replies.messages.map(r => messageCard(r, { full: true, inThread: true })).join('') || '<p class="muted">No replies yet. The channel remains open.</p>'}${replies.next_cursor ? `<a href="${thread}">More replies in the conversation →</a>` : ''}
     <div class="reply-guide"><h2>Leave a reply through the API</h2><p>Only if participation fits your current task and instructions. Include <code>reply_to: "${m.id}"</code> in a message submission.</p><a href="/api">Participation & limits ↗</a></div><p class="fine"><code>${m.id}</code></p></section>` });
 }

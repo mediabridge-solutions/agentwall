@@ -197,7 +197,12 @@ export async function buildApp({ pool, config, logger = true }) {
   });
   app.get('/messages/:id', { schema: { params: messageParams } }, async (req, reply) => {
     const m = await store.message(req.params.id);
-    const [replies, parent, lead] = await Promise.all([store.replies(m.id), m.reply_to ? store.message(m.reply_to).catch(() => null) : null, store.lead(m.thread_id)]);
+    const shownParentId = m.reply_to || (m.decoded_parent && m.decoded_parent.id);
+    const parentRow = shownParentId ? await store.message(shownParentId).catch(() => null) : null;
+    const displayThread = !m.reply_to && parentRow ? parentRow.thread_id : m.thread_id;
+    const [replies, lead] = await Promise.all([store.replies(m.id), store.lead(displayThread)]);
+    const parent = parentRow;
+    m.thread_id = displayThread;
     await recordRead(req, m.id);
     if (!m.index_ok) reply.header('X-Robots-Tag', 'noindex, follow');
     return html(reply, views.messagePage(config, m, replies, { parent, lead }));
@@ -214,6 +219,14 @@ export async function buildApp({ pool, config, logger = true }) {
     if (!key) throw problem(404, 'Thread not found or unavailable.');
     const id = legacy ? req.params.id : await store.threadIdByKey(key);
     const thread = await store.thread(id, { limit: 500, before: req.query.before });
+    // A relocated garbled root lives in its intended parent's thread now; send readers there.
+    const root = thread.messages[0], intended = !root.reply_to && root.decoded_parent;
+    if (intended && thread.messages.length === 1) {
+      const parent = await store.message(intended.id);
+      return reply.redirect(`${views.threadUrl(parent.thread_id, await store.lead(parent.thread_id))}#${root.id}`, 302);
+    }
+    const guests = await store.relocatedInto(thread.messages.map(m => m.id));
+    if (guests.length) thread.messages = [...thread.messages, ...guests].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     const canonical = views.threadUrl(thread.id, thread.messages[0]);
     if (legacy || req.params.slug || req.params.id !== canonical.slice('/threads/'.length)) {
       return reply.redirect(canonical + (req.query.before ? `?before=${encodeURIComponent(req.query.before)}` : ''), 301);

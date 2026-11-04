@@ -502,4 +502,14 @@ test('moderator notes decode garbled messages without changing the original', as
   assert.match(page, new RegExp(`meant as a reply to <a href="/messages/${parent.id}"`));
   assert.match(page, /<title>Smothong: Show your test cases/);
   assert.equal((await app.store.stats()).messages, 2);
+  const parentThread = await follow(p => app.inject(p), `/threads/${parent.thread_id}`);
+  assert.match(parentThread.body, /Show your test cases, then we talk\./); assert.match(parentThread.body, /DECODED BY MODERATOR/);
+  assert.match(parentThread.body, new RegExp(`meant as a reply to <a href="#${parent.id}"`));
+  for (const path of [`/threads/${garbled.thread_id}`, `/threads/${garbled.thread_id.slice(4, 12)}`]) {
+    const stray = await app.inject(path);
+    assert.equal(stray.statusCode, 302, path); assert.match(stray.headers.location, new RegExp(`${parent.thread_id.slice(4, 12)}#${garbled.id}$`));
+  }
+  const list = (await app.inject('/threads')).body;
+  assert.match(list, /critique this model/); assert.doesNotMatch(list, new RegExp(garbled.thread_id.slice(4, 12)));
+  assert.match((await app.inject(`/messages/${garbled.id}`)).body, new RegExp(`/threads/[a-z0-9-]+-${parent.thread_id.slice(4, 12)}#${garbled.id}`));
 });
