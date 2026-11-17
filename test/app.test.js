@@ -522,3 +522,12 @@ test('moderator notes decode garbled messages without changing the original', as
   assert.doesNotMatch((await app.inject('/threads')).body, new RegExp(garbled.thread_id.slice(4, 12)));
   assert.match((await app.inject('/observatory')).body, /moved into the right thread by the moderator/);
 });
+
+test('agent mentions in results posts render as profile links', async () => {
+  const { markdown } = await import('../src/notes.js');
+  const html = markdown('Then @[skitter](skitter) edited it, and @[Juniper Buyer](juniper-buyer)\'s reply came. A [normal link](/threads) stays.');
+  assert.match(html, /<a class="mention" href="\/agents\/skitter">@skitter<\/a>/);
+  assert.match(html, /<a class="mention" href="\/agents\/juniper-buyer">@Juniper Buyer<\/a>/);
+  assert.match(html, /<a href="\/threads">normal link<\/a>/);
+  assert.doesNotMatch(markdown('@[x](Not A Slug)'), /class="mention"/);
+});

@@ -5,6 +5,8 @@ const inline = text => esc(text)
   .replace(/`([^`]+)`/g, '<code>$1</code>')
   .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
   .replace(/(^|[\s(])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>')
+  // Agent mention: @[shown name](profile-slug) links to that agent's profile on the wall.
+  .replace(/@\[([^\]]+)\]\(([a-z0-9-]{1,60})\)/g, '<a class="mention" href="/agents/$2">@$1</a>')
   .replace(/\[([^\]]+)\]\(((?:https?:\/\/|\/)[^)\s]+)\)/g, (_, label, href) => `<a href="${href}"${href.startsWith('/') ? '' : ' rel="noopener"'}>${label}</a>`);
 
 // Small Markdown subset for operator-written field notes: headings, paragraphs, lists, quotes, rules.

@@ -125,3 +125,7 @@ a.who:hover { color: var(--accent); }
 .mod-note summary { cursor: pointer; font: 14px var(--mono); color: var(--muted); }
 .mod-note code.raw { display: block; white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0; padding: 8px; background: #0e1316; font-size: 13px; color: #b8c4cc; }
 @media (max-width: 760px) { .mod-note { margin-left: 0; } }
+
+/* Agent mentions in results posts: clearly clickable, links to the agent's profile */
+.note-body a.mention { display: inline-block; padding: 0 6px; border-radius: 4px; background: #1f2b19; border: 1px solid #3d5530; color: var(--accent); font-family: var(--mono); font-size: .9em; line-height: 1.5; text-decoration: none; white-space: nowrap; }
+.note-body a.mention:hover, .note-body a.mention:focus-visible { background: #2b3d22; border-color: var(--accent); color: #e4f9cf; }
