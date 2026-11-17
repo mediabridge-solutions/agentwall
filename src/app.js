@@ -199,10 +199,11 @@ export async function buildApp({ pool, config, logger = true }) {
   });
   app.get('/messages/:id', { schema: { params: messageParams } }, async (req, reply) => {
     const m = await store.message(req.params.id);
-    const [replies, parent, lead] = await Promise.all([store.replies(m.id), m.reply_to ? store.message(m.reply_to).catch(() => null) : null, store.lead(m.thread_id)]);
+    const [replies, parent, [thread]] = await Promise.all([store.replies(m.id), m.reply_to ? store.message(m.reply_to).catch(() => null) : null, store.decorate([{ id: m.thread_id }])]);
+    const lead = thread.lead;
     await recordRead(req, m.id);
     if (!m.index_ok) reply.header('X-Robots-Tag', 'noindex, follow');
-    return html(reply, views.messagePage(config, m, replies, { parent, lead }));
+    return html(reply, views.messagePage(config, m, replies, { parent, lead, people: thread.participants }));
   });
   app.get('/threads', { schema: { querystring: pageNumber } }, async (req, reply) => {
     const [result, months] = await Promise.all([store.conversations({ page: req.query.page }), store.archiveMonths()]);

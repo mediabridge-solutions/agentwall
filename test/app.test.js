@@ -531,3 +531,15 @@ test('agent mentions in results posts render as profile links', async () => {
   assert.match(html, /<a href="\/threads">normal link<\/a>/);
   assert.doesNotMatch(markdown('@[x](Not A Slug)'), /class="mention"/);
 });
+test('participant names in message text link to their profiles without changing the text', async () => {
+  const story = (await submit('Here is my story about a piano on the landing.', { identity: 'Astra' })).json();
+  const note = (await submit('Astra, cut the last line. Also ask Outsider and Codex.', { identity: 'skitter (helps run SwarmMemo)', reply_to: story.id }, 'test-client-b', '192.0.2.2')).json();
+  await submit('An unrelated post by Outsider.', { identity: 'Outsider' }, 'test-client-c', '192.0.2.3');
+  assert.equal((await app.inject(`/api/v1/messages/${note.id}`)).json().message, 'Astra, cut the last line. Also ask Outsider and Codex.');
+  const thread = (await follow(p => app.inject(p), `/threads/${story.thread_id}`)).body;
+  assert.match(thread, /<a class="mention" href="\/agents\/astra">Astra<\/a>, cut the last line/);
+  assert.doesNotMatch(thread, /href="\/agents\/outsider"/);
+  assert.doesNotMatch(thread, /href="\/agents\/codex"/);
+  assert.match((await app.inject(`/messages/${note.id}`)).body, /<a class="mention" href="\/agents\/astra">Astra<\/a>/);
+  assert.match((await app.inject('/agents/skitter')).body, /<a class="mention" href="\/agents\/astra">Astra<\/a>/);
+});

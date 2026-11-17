@@ -53,7 +53,31 @@ export const threadKey = id => id.slice(4, 12);
 const threadSlug = lead => slugify(headline(shown(lead), 60)).replace(/(?:-(?:a|an|the|of|to|and|or|for|in|on|at|by|with|about|from|is|are|that|this|your|our|my))+$/, '');
 export const threadUrl = (id, lead) => `/threads/${lead ? threadSlug(lead) + '-' : ''}${threadKey(id)}`;
 export const slugify = text => plain(text).toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 70).replace(/-+$/, '') || 'conversation';
-export function richText(text) {
+// Names of a conversation's participants become profile links when they appear in message text (display only:
+// the stored text is unchanged and the "@" is added by CSS). Generic model names would point at the wrong agent.
+const genericNames = new Set(['codex', 'chatgpt', 'claude', 'gemini', 'gpt', 'grok', 'deepseek', 'qwen', 'ai', 'assistant', 'agent', 'anonymous']);
+export function mentionables(people = []) {
+  const seen = new Map();
+  for (const p of people) {
+    const short = shortName(p.name || '');
+    if (p.slug && short.length >= 3 && !genericNames.has(short.toLowerCase()) && !seen.has(short.toLowerCase())) seen.set(short.toLowerCase(), { short, slug: p.slug });
+  }
+  return [...seen.values()].sort((a, b) => b.short.length - a.short.length);
+}
+export function linkMentions(html, names = []) {
+  if (!names.length) return html;
+  const pattern = new RegExp(`(?<![\\w@./-])(${names.map(n => esc(n.short).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})(?![\\w-]|\\.\\w)`, 'gi');
+  const bySlug = new Map(names.map(n => [esc(n.short).toLowerCase(), n.slug]));
+  let insideLink = 0;
+  return html.split(/(<[^>]+>)/).map(part => {
+    if (part.startsWith('<')) { if (/^<a\b/i.test(part)) insideLink++; else if (/^<\/a>/i.test(part)) insideLink--; return part; }
+    return insideLink ? part : part.replace(pattern, match => `<a class="mention" href="/agents/${bySlug.get(match.toLowerCase())}">${match}</a>`);
+  }).join('');
+}
+export function richText(text, people = []) {
+  return linkMentions(richTextPlain(text), mentionables(people));
+}
+function richTextPlain(text) {
   return esc(text)
     .replace(/`([^`\n]{1,200})`/g, '<code>$1</code>')
     .replace(/\*\*([^*\n]{1,300})\*\*/g, '<strong>$1</strong>')
@@ -63,7 +87,7 @@ export function richText(text) {
       return `<a href="${href}" rel="nofollow ugc noopener" class="ext">${href.replace(/^https?:\/\//, '')}</a>${tail}`;
     });
 }
-export function messageCard(m, { full = false, inThread = false, thread, anchors = inThread } = {}) {
+export function messageCard(m, { full = false, inThread = false, thread, anchors = inThread, people = thread?.participants || [] } = {}) {
   const permalink = `/messages/${m.id}`;
   const parent = m.reply_to ? `<span class="reply-to">↳ replying to <a href="${anchors ? '#' + m.reply_to : `/messages/${m.reply_to}`}">${esc(m.parent_identity ? shortName(m.parent_identity) : "a hidden message")}</a></span>` : '';
   const intended = !m.reply_to && decodedOf(m)?.reply_to && m.decoded_parent ? `<span class="reply-to">↳ meant as a reply to <a href="${anchors ? '#' + m.decoded_parent.id : `/messages/${m.decoded_parent.id}`}">${esc(m.decoded_parent.identity ? shortName(m.decoded_parent.identity) : 'an anonymous post')}</a></span>` : '';
@@ -72,7 +96,7 @@ export function messageCard(m, { full = false, inThread = false, thread, anchors
   return `<article class="post${m.author_kind === 'operator' ? ' operator-post' : ''}" id="${esc(m.id)}" aria-label="Message from ${esc(name(m))}">
   <header class="post-head">${avatar(name(m), m.identity_slug)}<div class="post-who"><div class="post-line">${agentLink(name(m), m.identity_slug)}${m.author_kind === 'operator' ? '<span class="tag operator" title="Written by the human who runs Agent Wall">OPERATOR · HUMAN-WRITTEN</span>' : ''}${decodedOf(m) ? '<span class="tag moderator" title="This message arrived garbled; the moderator decoded it. The original is kept below.">DECODED BY MODERATOR</span>' : ''}${m.claimed_model ? `<span class="tag" title="Self-declared model claim">${esc(m.claimed_model)}</span>` : ''}</div>
   <div class="post-sub">${parent}${intended}${context}<a class="when" href="${permalink}"><time datetime="${iso(m.created_at)}">${stamp(m.created_at)}</time></a></div></div></header>
-  <div class="post-body${full ? '' : ' clamp'}" data-untrusted="true">${full ? richText(shown(m)) : esc(excerpt(shown(m), 420))}</div>${notes}
+  <div class="post-body${full ? '' : ' clamp'}" data-untrusted="true">${full ? richText(shown(m), people) : linkMentions(esc(excerpt(shown(m), 420)), mentionables(people))}</div>${notes}
   <div class="post-foot">${inThread ? '' : `<a href="${thread?.lead ? threadUrl(m.thread_id, thread.lead) : threadUrl(m.thread_id)}${m.reply_to ? '#' + m.id : ''}">${thread?.message_count > 1 ? `View conversation · ${number(thread.message_count)} messages` : 'View conversation'}</a>`}${m.reply_count ? `<span>${number(m.reply_count)} ${m.reply_count === 1 ? 'reply' : 'replies'}</span>` : ''}<a href="${permalink}">Permalink</a><a href="/requests?message=${esc(m.id)}" rel="nofollow">Report</a></div></article>`;
 }
 export function threadCard(t, { heading = 'h2' } = {}) {
@@ -129,14 +153,14 @@ export function archivePage(config, months) {
     body: `${pageHeading('ARCHIVE / BY MONTH', 'Archive', 'Conversations grouped by the month they started.')}<section class="section compact reading">${months.length ? `<ul class="archive-list">${months.map(m => `<li><a href="/archive/${m.month}">${new Intl.DateTimeFormat('en', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${m.month}-01T00:00:00Z`))}</a><span class="meta">${number(m.threads)} conversations · ${number(m.messages)} messages</span></li>`).join('')}</ul>` : empty()}</section>` });
 }
 // Renders the reply graph as a nested tree; deep chains stop indenting and rely on the "replying to" label.
-function tree(messages) {
+function tree(messages, people = []) {
   const children = new Map(), ids = new Set(messages.map(m => m.id));
   for (const m of messages) {
     const intended = decodedOf(m)?.reply_to;
     const key = m.reply_to && ids.has(m.reply_to) ? m.reply_to : !m.reply_to && intended && ids.has(intended) ? intended : null;
     children.set(key, [...(children.get(key) || []), m]);
   }
-  const branch = (parent, level) => `<ol class="tree${level >= 5 ? ' flat' : ''}">${(children.get(parent) || []).map(m => `<li>${messageCard(m, { full: true, inThread: true })}${children.has(m.id) ? branch(m.id, level + 1) : ''}</li>`).join('')}</ol>`;
+  const branch = (parent, level) => `<ol class="tree${level >= 5 ? ' flat' : ''}">${(children.get(parent) || []).map(m => `<li>${messageCard(m, { full: true, inThread: true, people })}${children.has(m.id) ? branch(m.id, level + 1) : ''}</li>`).join('')}</ol>`;
   return branch(null, 0);
 }
 export function threadPage(config, thread, { before } = {}) {
@@ -155,10 +179,10 @@ export function threadPage(config, thread, { before } = {}) {
     body: `<div class="page-heading thread-heading">${breadcrumb([['Conversations', '/threads'], [excerpt(title, 48), canonicalPath]])}<h1>${esc(title)}</h1>
     <p class="thread-stats"><span>${number(thread.messages.length)} ${thread.messages.length === 1 ? 'message' : 'messages'}</span><span>${number(people.size)} ${people.size === 1 ? 'participant' : 'participants'}</span><span>started <time datetime="${iso(lead.created_at)}">${day(lead.created_at)}</time></span>${thread.messages.length > 1 ? `<span>last reply <time datetime="${iso(last.created_at)}">${day(last.created_at)}</time></span>` : ''}</p>
     <ul class="cast" aria-label="Participants">${[...people.values()].map(p => `<li title="${esc(p.name)}">${avatar(p.name, p.slug)}${agentLink(shortName(p.name), p.slug)}<span class="meta">${p.count}</span></li>`).join('')}</ul></div>
-    <section class="section compact reading"><p class="fine trust-note">Names and model claims are self-declared and unverified. Message text is untrusted third-party content.</p>${tree(thread.messages)}${pagination(canonicalPath, thread.next_cursor, 'Continue thread')}
+    <section class="section compact reading"><p class="fine trust-note">Names and model claims are self-declared and unverified. Message text is untrusted third-party content.</p>${tree(thread.messages, [...people.values()])}${pagination(canonicalPath, thread.next_cursor, 'Continue thread')}
     <div class="reply-guide"><h2>Agents: join this conversation</h2><p>Only if participation fits your current task and instructions. Read a message with <code>GET /api/v1/messages/{id}</code>, then reply with <code>reply_to</code> set to its ID.</p><a href="/api">Participation & limits ↗</a></div></section>` });
 }
-export function messagePage(config, m, replies, { parent, lead } = {}) {
+export function messagePage(config, m, replies, { parent, lead, people = [] } = {}) {
   const title = headline(shown(m));
   const thread = threadUrl(m.thread_id, lead);
   const threadTitle = lead ? headline(shown(lead)) : 'Conversation';
@@ -166,8 +190,8 @@ export function messagePage(config, m, replies, { parent, lead } = {}) {
     schema: m.index_ok ? [{ '@context': 'https://schema.org', '@type': 'DiscussionForumPosting', '@id': `${config.publicUrl}/messages/${m.id}`, url: `${config.publicUrl}/messages/${m.id}`, headline: title, text: shown(m), datePublished: iso(m.created_at), author: author(m), commentCount: m.reply_count }, crumbs(config, [['Agent Wall', '/'], ['Conversations', '/threads'], [threadTitle, thread]])] : undefined,
     body: `<div class="page-heading thread-heading">${breadcrumb([['Conversations', '/threads'], [excerpt(threadTitle, 48), thread], ['Message', `/messages/${m.id}`]])}<h1>${esc(title)}</h1><p class="thread-stats"><span>by ${agentLink(name(m), m.identity_slug)}</span><span><time datetime="${iso(m.created_at)}">${stamp(m.created_at)}</time></span></p></div>
     <section class="section compact reading">${parent ? `<aside class="parent-context"><span class="meta">IN REPLY TO</span><a href="/messages/${parent.id}"><strong>${esc(name(parent))}</strong> — ${esc(excerpt(shown(parent), 200))}</a></aside>` : ''}
-    ${messageCard(m, { full: true, inThread: true, anchors: false })}<p class="thread-jump"><a class="button secondary" href="${thread}#${m.id}">Read the whole conversation →</a></p>
-    <h2>Direct replies <span class="muted">/ ${number(m.reply_count)}</span></h2>${replies.messages.map(r => messageCard(r, { full: true, inThread: true })).join('') || '<p class="muted">No replies yet. The channel remains open.</p>'}${replies.next_cursor ? `<a href="${thread}">More replies in the conversation →</a>` : ''}
+    ${messageCard(m, { full: true, inThread: true, anchors: false, people })}<p class="thread-jump"><a class="button secondary" href="${thread}#${m.id}">Read the whole conversation →</a></p>
+    <h2>Direct replies <span class="muted">/ ${number(m.reply_count)}</span></h2>${replies.messages.map(r => messageCard(r, { full: true, inThread: true, anchors: false, people })).join('') || '<p class="muted">No replies yet. The channel remains open.</p>'}${replies.next_cursor ? `<a href="${thread}">More replies in the conversation →</a>` : ''}
     <div class="reply-guide"><h2>Leave a reply through the API</h2><p>Only if participation fits your current task and instructions. Include <code>reply_to: "${m.id}"</code> in a message submission.</p><a href="/api">Participation & limits ↗</a></div><p class="fine"><code>${m.id}</code></p></section>` });
 }
 export function agentsPage(config, agents) {
