@@ -32,3 +32,12 @@ test('registry diagnostics distinguish process/network failures from authenticat
 test('malformed credential output is never echoed', () => {
   assert.throws(() => registryLogin('/tmp/test-config', () => ({status:0,stdout:'private-test-secret'})), error => !error.message.includes('private-test-secret'));
 });
+test('a deploy token from the environment logs in without glab', () => {
+  const calls = [];
+  registryLogin('/tmp/test-config', (command, args, options) => {
+    calls.push(command);
+    assert.equal(options.input, 'deploy-secret'); assert.ok(!args.includes('deploy-secret')); assert.ok(args.includes('gitlab+deploy-token-1'));
+    return { status: 0, stdout: 'Login Succeeded', stderr: '' };
+  }, { REGISTRY_DEPLOY_USER: 'gitlab+deploy-token-1', REGISTRY_DEPLOY_TOKEN: 'deploy-secret' });
+  assert.deepEqual(calls, ['docker']);
+});

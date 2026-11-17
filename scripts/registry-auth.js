@@ -14,8 +14,19 @@ export function redactRegistryDiagnostic(value, credentials = {}) {
     .slice(0, 4000).trim();
 }
 
-export function registryLogin(configDir, run = spawnSync) {
+// A GitLab deploy token (write_registry) in the ignored .env does not expire like the glab OAuth login.
+export function deployTokenCredentials(env = process.env) {
+  return env.REGISTRY_DEPLOY_USER && env.REGISTRY_DEPLOY_TOKEN ? { Username: env.REGISTRY_DEPLOY_USER, Secret: env.REGISTRY_DEPLOY_TOKEN } : null;
+}
+
+export function registryLogin(configDir, run = spawnSync, env = process.env) {
   const registry = 'registry.gitlab.com';
+  const token = deployTokenCredentials(env);
+  if (token) {
+    const login = run('docker', ['--config', configDir, 'login', registry, '-u', token.Username, '--password-stdin'], { input: token.Secret, encoding: 'utf8', timeout: 45000 });
+    if (login.status !== 0) throw new Error(`Docker registry login with deploy token failed (exit ${login.status ?? 'none'}): ${redactRegistryDiagnostic(login.stderr || login.stdout, token) || 'No Docker diagnostic returned.'}`);
+    return;
+  }
   const auth = run('glab', ['auth', 'docker-helper', 'get'], { input: `${registry}\n`, encoding: 'utf8', timeout: 30000 });
   if (auth.status !== 0) throw new Error(`GitLab credential helper failed (exit ${auth.status ?? 'none'}, code ${auth.error?.code || 'none'}): ${redactRegistryDiagnostic(auth.stderr) || 'No diagnostic returned.'}`);
   let credentials;
